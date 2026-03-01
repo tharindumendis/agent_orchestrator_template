@@ -1,0 +1,480 @@
+"""
+core/agent.py
+-------------
+The heart of the Orchestrator Agent.
+
+Responsibilities:
+1. Read config — know which worker agents + direct MCP tool servers to connect.
+2. Spawn each worker agent as an MCP stdio subprocess → discover its tools.
+3. Connect to each direct MCP tool server → discover its tools.
+4. Combine ALL tools into one LangGraph ReAct loop.
+5. Log every single step via JobLogger.
+6. Expose run_orchestrator(task, config) -> str  used by main.py.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import traceback
+import warnings
+from contextlib import AsyncExitStack
+from pathlib import Path
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.tools import BaseTool
+from langchain_ollama import ChatOllama
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    pass
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+except ImportError:
+    pass
+
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langgraph.prebuilt import create_react_agent
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+from core.config_loader import AppConfig
+from core.job_logger import JobLogger
+from core.memory import get_backend
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _tool_input(tool_call: dict) -> dict:
+    return tool_call.get("args", {}) or {}
+
+
+def _truncate(text: str, max_chars: int = 1000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... [{len(text) - max_chars} chars truncated]"
+
+
+def _unwrap_exception(exc: BaseException) -> BaseException:
+    if hasattr(exc, "exceptions") and exc.exceptions:
+        return _unwrap_exception(exc.exceptions[0])
+    return exc
+
+
+def _content_to_str(content) -> str:
+    """Normalise AIMessage.content to a plain string (handles Gemini list format)."""
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", str(b)) if isinstance(b, dict) else str(b)
+            for b in content
+        )
+    if not isinstance(content, str):
+        return str(content)
+    return content
+
+
+# ---------------------------------------------------------------------------
+# Main entry-point
+# ---------------------------------------------------------------------------
+
+
+async def run_orchestrator(task: str, config: AppConfig) -> str:
+    """
+    Execute a high-level task using the orchestrator's ReAct loop.
+
+    Phases:
+      1. Connect to all worker agents (MCP stdio subprocesses) → tools
+      2. Connect to all direct MCP tool servers → tools
+      3. Build LangGraph ReAct graph with all tools
+      4. Stream ReAct loop, log every step
+      5. Return final answer string
+
+    Args:
+        task:   The natural-language goal for this orchestration run.
+        config: Loaded AppConfig from config.yaml.
+
+    Returns:
+        str: The final answer produced by the orchestrator.
+    """
+    jl = JobLogger(task=task, agent_name=config.agent.name)
+    logger.info(
+        "[%s] Orchestration job %s started | task: %s",
+        config.agent.name,
+        jl.job_id,
+        task[:120],
+    )
+
+    all_tools: list[BaseTool] = []
+    final_answer = ""
+    success = False
+    _tools_used: list[str] = []    # track tool names for memory save
+
+    # ----------------------------------------------------------------
+    # PHASE 0 — Load long-term memory and build enriched system prompt
+    # ----------------------------------------------------------------
+    mem_cfg = config.memory
+    mem_dir = Path(mem_cfg.memory_dir)
+    if not mem_dir.is_absolute():
+        mem_dir = Path(__file__).parent.parent / mem_cfg.memory_dir
+
+    memory_context = ""
+    if mem_cfg.enabled:
+        try:
+            backend = get_backend(
+                backend_type=mem_cfg.backend,
+                memory_dir=mem_dir,
+                max_save_length=mem_cfg.max_save_length,
+            )
+            past = backend.load_relevant(task=task, n=mem_cfg.max_context_entries)
+            if past:
+                memory_context = backend.build_context(past)
+                logger.info("[Memory] Injecting %d past memories into prompt.", len(past))
+        except Exception as exc:
+            logger.warning("[Memory] Failed to load memories: %s", exc)
+            backend = None
+    else:
+        backend = None
+
+    try:
+        async with AsyncExitStack() as stack:
+
+            # ----------------------------------------------------------------
+            # PHASE 1 — Connect to worker agents (MCP servers)
+            # ----------------------------------------------------------------
+            for wa_cfg in config.worker_agents:
+                server_params = StdioServerParameters(
+                    command=wa_cfg.command,
+                    args=wa_cfg.args,
+                    env=wa_cfg.env or None,
+                )
+                try:
+                    read, write = await stack.enter_async_context(
+                        stdio_client(server_params)
+                    )
+                    session: ClientSession = await stack.enter_async_context(
+                        ClientSession(read, write)
+                    )
+                    await session.initialize()
+                    tools = await load_mcp_tools(session)
+                    tool_names = [t.name for t in tools]
+                    all_tools.extend(tools)
+
+                    jl.log_step(
+                        step_type="WORKER_CONNECT",
+                        title=wa_cfg.name,
+                        details={
+                            "command": wa_cfg.command,
+                            "args": wa_cfg.args,
+                            "description": wa_cfg.description,
+                            "tools_discovered": tool_names,
+                        },
+                        success=True,
+                    )
+                    logger.info(
+                        "[WORKER] Connected to '%s' | tools: %s", wa_cfg.name, tool_names
+                    )
+
+                except Exception as exc:
+                    tb = traceback.format_exc()
+                    jl.log_step(
+                        step_type="WORKER_CONNECT",
+                        title=wa_cfg.name,
+                        details={"command": wa_cfg.command, "args": wa_cfg.args},
+                        error=f"{exc}\n{tb}",
+                        success=False,
+                    )
+                    logger.error(
+                        "[WORKER] Failed to connect to '%s': %s", wa_cfg.name, exc
+                    )
+
+            # ----------------------------------------------------------------
+            # PHASE 2 — Connect to direct MCP tool servers
+            # ----------------------------------------------------------------
+            for client_cfg in config.mcp_clients:
+                server_params = StdioServerParameters(
+                    command=client_cfg.command,
+                    args=client_cfg.args,
+                    env=client_cfg.env or None,
+                )
+                try:
+                    read, write = await stack.enter_async_context(
+                        stdio_client(server_params)
+                    )
+                    session = await stack.enter_async_context(
+                        ClientSession(read, write)
+                    )
+                    await session.initialize()
+                    tools = await load_mcp_tools(session)
+                    tool_names = [t.name for t in tools]
+                    all_tools.extend(tools)
+
+                    jl.log_step(
+                        step_type="MCP_CONNECT",
+                        title=client_cfg.name,
+                        details={
+                            "command": client_cfg.command,
+                            "args": client_cfg.args,
+                            "tools_discovered": tool_names,
+                        },
+                        success=True,
+                    )
+                    logger.info(
+                        "[MCP] Connected to '%s' | tools: %s", client_cfg.name, tool_names
+                    )
+
+                except Exception as exc:
+                    tb = traceback.format_exc()
+                    jl.log_step(
+                        step_type="MCP_CONNECT",
+                        title=client_cfg.name,
+                        details={"command": client_cfg.command, "args": client_cfg.args},
+                        error=f"{exc}\n{tb}",
+                        success=False,
+                    )
+                    logger.error(
+                        "[MCP] Failed to connect to '%s': %s", client_cfg.name, exc
+                    )
+
+            # ----------------------------------------------------------------
+            # PHASE 2.5 — Add memory tools so LLM can query/save explicitly
+            # ----------------------------------------------------------------
+            if mem_cfg.enabled and backend is not None:
+                from langchain_core.tools import tool as lc_tool
+
+                @lc_tool
+                def memory_search(query: str) -> str:
+                    """Search your long-term memory for past tasks and results related to *query*."""
+                    return backend.search(query)
+
+                @lc_tool
+                def memory_save(fact: str) -> str:
+                    """Save an important fact or note to your long-term memory for future sessions."""
+                    return backend.save_fact(fact)
+
+                all_tools.extend([memory_search, memory_save])
+                logger.info("[Memory] Added memory_search and memory_save tools (backend=%s).", mem_cfg.backend)
+
+            if not all_tools:
+                jl.log_step(
+                    step_type="INFO",
+                    title="No tools available",
+                    details={
+                        "note": (
+                            "Running in LLM-only mode. "
+                            "Configure worker_agents or mcp_clients in config.yaml."
+                        )
+                    },
+                )
+                logger.warning(
+                    "No tools available — orchestrator running in LLM-only mode."
+                )
+
+            # ----------------------------------------------------------------
+            # PHASE 3 — Build orchestrator LLM + ReAct agent
+            # ----------------------------------------------------------------
+            tool_descriptions = "\n".join(
+                f"  - {t.name}: {getattr(t, 'description', 'no description')}"
+                for t in all_tools
+            )
+            base_prompt = config.agent.system_prompt
+            # Prepend long-term memory if available
+            if memory_context:
+                base_prompt = memory_context + "\n\n" + base_prompt
+            enriched_prompt = base_prompt + (
+                f"\n\nAvailable tools:\n{tool_descriptions}" if tool_descriptions else ""
+            )
+
+            provider = config.model.provider.lower()
+            if provider == "openai":
+                llm = ChatOpenAI(
+                    model=config.model.model_name,
+                    temperature=config.model.temperature,
+                    api_key=config.model.api_key,
+                    base_url=(
+                        config.model.base_url
+                        if config.model.base_url != "http://localhost:11434"
+                        else None
+                    ),
+                )
+            elif provider == "gemini":
+                llm = ChatGoogleGenerativeAI(
+                    model=config.model.model_name,
+                    temperature=config.model.temperature,
+                    api_key=config.model.api_key,
+                )
+            else:
+                llm = ChatOllama(
+                    model=config.model.model_name,
+                    temperature=config.model.temperature,
+                    base_url=config.model.base_url,
+                )
+
+            graph = create_react_agent(model=llm, tools=all_tools)
+
+            jl.log_step(
+                step_type="AGENT_INIT",
+                title="Orchestrator ReAct agent ready",
+                details={
+                    "model": f"{config.model.provider}/{config.model.model_name}",
+                    "temperature": config.model.temperature,
+                    "total_tools": len(all_tools),
+                    "tools": [t.name for t in all_tools],
+                },
+            )
+            logger.info(
+                "Orchestrator ready | model=%s/%s | tools(%d)=%s",
+                config.model.provider,
+                config.model.model_name,
+                len(all_tools),
+                [t.name for t in all_tools],
+            )
+
+            # ----------------------------------------------------------------
+            # PHASE 4 — Run the ReAct loop + log every event
+            # ----------------------------------------------------------------
+            messages = [
+                SystemMessage(content=enriched_prompt),
+                HumanMessage(content=task),
+            ]
+
+            _logged_tool_calls: set = set()
+            _llm_step = 0
+
+            async for event in graph.astream(
+                {"messages": messages},
+                stream_mode="values",
+            ):
+                last_msg = event["messages"][-1]
+
+                # ── AIMessage: LLM text or tool-call plan ─────────────────
+                if isinstance(last_msg, AIMessage):
+                    tool_calls = getattr(last_msg, "tool_calls", []) or []
+
+                    if last_msg.content:
+                        _llm_step += 1
+                        content_str = _content_to_str(last_msg.content)
+                        jl.log_step(
+                            step_type="LLM_RESPONSE",
+                            title=f"Orchestrator turn {_llm_step}",
+                            output=_truncate(content_str),
+                        )
+                        final_answer = content_str
+
+                    for tc in tool_calls:
+                        tc_id = tc.get("id", "")
+                        if tc_id in _logged_tool_calls:
+                            continue
+                        _logged_tool_calls.add(tc_id)
+                        jl.log_step(
+                            step_type="TOOL_CALL",
+                            title=tc.get("name", "unknown"),
+                            details={
+                                "tool": tc.get("name"),
+                                "call_id": tc_id,
+                                "input": _tool_input(tc),
+                            },
+                        )
+
+                # ── ToolMessage: result came back ─────────────────────────
+                elif isinstance(last_msg, ToolMessage):
+                    raw_content = last_msg.content or ""
+                    content_str = _content_to_str(raw_content)
+                    is_error = any(
+                        kw in content_str.lower()
+                        for kw in ("error", "exception", "traceback")
+                    )
+                    tool_name = getattr(last_msg, "name", "tool") or "tool"
+                    if tool_name not in _tools_used:
+                        _tools_used.append(tool_name)
+                    jl.log_step(
+                        step_type="TOOL_RESULT",
+                        title=getattr(last_msg, "name", "tool") or "tool",
+                        details={"call_id": getattr(last_msg, "tool_call_id", "")},
+                        output=_truncate(content_str),
+                        success=not is_error,
+                        error=content_str if is_error else None,
+                    )
+
+            success = True
+
+    except BaseException as root_exc:
+        exc = _unwrap_exception(root_exc)
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+            logger.warning(
+                "[%s] Job %s cancelled/interrupted.", config.agent.name, jl.job_id
+            )
+            final_answer = "ERROR: Orchestration was cancelled or interrupted."
+            success = False
+
+        elif type(exc).__name__ in (
+            "RateLimitError",
+            "AuthenticationError",
+            "APIConnectionError",
+            "APIError",
+            "InvalidRequestError",
+        ):
+            jl.log_step(
+                step_type="LLM_API_ERROR",
+                title=type(exc).__name__,
+                error=str(exc),
+                success=False,
+            )
+            logger.error(
+                "[%s] Job %s LLM API error: %s", config.agent.name, jl.job_id, exc
+            )
+            final_answer = f"ERROR: LLM Provider Issue ({type(exc).__name__}): {exc}"
+            success = False
+
+        else:
+            jl.log_step(
+                step_type="FATAL_ERROR",
+                title=type(exc).__name__,
+                error=f"{exc}\n\n{tb}",
+                success=False,
+            )
+            logger.exception(
+                "[%s] Job %s unhandled exception: %s", config.agent.name, jl.job_id, exc
+            )
+            final_answer = f"ERROR: {type(exc).__name__}: {exc}"
+            success = False
+
+    finally:
+        jl.finish(final_answer=final_answer, success=success)
+        logger.info(
+            "[%s] Job %s %s | log: %s",
+            config.agent.name,
+            jl.job_id,
+            "COMPLETE" if success else "FAILED",
+            jl.path,
+        )
+        # ----------------------------------------------------------------
+        # PHASE 5 — Auto-save job summary to long-term memory
+        # ----------------------------------------------------------------
+        if mem_cfg.enabled and backend is not None and (final_answer or not success):
+            try:
+                backend.save(
+                    job_id=jl.job_id,
+                    task=task,
+                    summary=final_answer or "Job failed with no output.",
+                    tools_used=_tools_used,
+                    outcome="success" if success else "failed",
+                )
+            except Exception as exc:
+                logger.warning("[Memory] Failed to save memory: %s", exc)
+
+    return final_answer or "Orchestrator completed but produced no text output."

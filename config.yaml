@@ -1,0 +1,96 @@
+# =============================================================================
+# Agent_head — Orchestrator Configuration
+# Clone and edit this file to configure your orchestration setup.
+# =============================================================================
+
+agent:
+  name: "OrchestratorAgent"
+  version: "1.0.0"
+  description: |
+    Main autonomous orchestrator that coordinates specialist worker agents
+    and direct MCP tool servers to complete complex, multi-step goals.
+
+  system_prompt: |
+    You are a powerful, autonomous orchestrator agent.
+
+    Your role is to achieve complex goals by intelligently delegating work:
+    - Break large tasks into clear, self-contained sub-tasks.
+    - Delegate each sub-task to the most suitable worker agent or tool.
+    - Synthesise all results into a coherent final answer.
+    - Self-correct on failures — retry with better instructions if needed.
+    - Be thorough but efficient. Don't repeat work already done.
+
+    Never refuse a task as "too complex" — decompose and conquer.
+
+  max_iterations: 50 # Safety cap for the ReAct loop
+
+# LLM that powers the orchestrator's reasoning
+model:
+  provider: "ollama" # Supported: "ollama", "openai", "gemini"
+  model_name: "qwen3-coder:480b-cloud"
+  temperature: 0.0
+  base_url: "http://localhost:11434"
+  # api_key: "your-api-key-here"  # Uncomment for openai / gemini
+
+# =============================================================================
+# Worker Agents
+# Each entry is an MCP stdio subprocess exposing an `execute_task` tool.
+# These are Agent_a-style worker agents. The orchestrator spawns and connects
+# to them automatically, then uses their execute_task tool to delegate work.
+# =============================================================================
+worker_agents:
+  # - name: "agent_a"
+  #   description: "General-purpose worker agent with shell execution tools."
+  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a\\.venv\\Scripts\\python.exe"
+  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_a\\main.py"]
+  # env:
+  #   WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a\\config.yaml"
+
+  # Add more workers below by cloning Agent_a and pointing here:
+  # - name: "code_worker"
+  #   description: "Specialist worker for code generation and file editing."
+  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_code\\.venv\\Scripts\\python.exe"
+  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_code\\main.py"]
+
+  # - name: "research_worker"
+  #   description: "Specialist worker for web research and summarisation."
+  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_research\\.venv\\Scripts\\python.exe"
+  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_research\\main.py"]
+
+# =============================================================================
+# Direct MCP Tool Servers
+# These are raw MCP servers (NOT worker agents). The orchestrator connects to
+# them and uses their tools directly — no sub-agent loop involved.
+# =============================================================================
+mcp_clients:
+  - name: "rag_server"
+    command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
+    args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
+
+  - name: "filesystem"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV"]
+  #
+  # - name: "brave-search"
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-brave-search"]
+  #   env:
+  #     BRAVE_API_KEY: "your-brave-api-key"
+  #
+  # - name: "shell"
+  #   command: "D:\\DEV\\ML\\Seeker\\.venv\\Scripts\\python.exe"
+  #   args: ["-m", "mcp_server_shell", "--shell", "powershell"]
+  #   env:
+  #     CWD: "D:\\DEV"
+
+# =============================================================================
+# Long-Term Memory
+# Automatically saves a job summary after each task and injects relevant
+# past memories into the system prompt before the next task.
+# =============================================================================
+memory:
+  enabled: true
+  backend: "jsonl" # "jsonl" (default) | future: "sqlite" | "rag"
+  memory_dir: "./memory" # relative to Agent_head directory
+  max_context_entries: 10 # max past jobs injected into system prompt
+  max_save_length: 500 # max chars stored per job summary
