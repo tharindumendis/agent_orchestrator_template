@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from typing import Literal
 import logging
 import sys
 import warnings
@@ -198,130 +199,254 @@ async def interactive_loop(
     print(f"\n  Type your goal below. Workers available: {workers}")
     print("  'quit' or Ctrl-C to exit.\n")
 
-    while True:
-        try:
-            task = input(f"\n{_c(BOLD, '>> Task:')} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n\nExiting.")
-            break
+    # ── One-time setup: connect tools, build LLM + graph ──────────────────────
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as _AIMessage
+    from langgraph.prebuilt import create_react_agent
+    from contextlib import AsyncExitStack
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from langchain_mcp_adapters.tools import load_mcp_tools
+    from langchain_ollama import ChatOllama
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError:
+        pass
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+    except ImportError:
+        pass
 
-        if not task:
-            continue
-        if task.lower() in {"quit", "exit", "q"}:
-            print("Exiting.")
-            break
+    print(f"\n{_c(GREY, '[*] Connecting to worker agents and tools...')}")
 
-        try:
-            # For the interactive REPL we stream events live
-            from core.agent import run_orchestrator as _run
-            from langchain_core.messages import SystemMessage, HumanMessage
-            from langgraph.prebuilt import create_react_agent
-            from contextlib import AsyncExitStack
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
-            from langchain_mcp_adapters.tools import load_mcp_tools
-            from langchain_ollama import ChatOllama
+    all_tools = []
+    _stack = AsyncExitStack()
+    await _stack.__aenter__()
+
+    try:
+        for wa in config.worker_agents:
             try:
-                from langchain_openai import ChatOpenAI
-            except ImportError:
-                pass
+                params = StdioServerParameters(
+                    command=wa.command, args=wa.args, env=wa.env or None
+                )
+                r, w = await _stack.enter_async_context(stdio_client(params))
+                sess = await _stack.enter_async_context(ClientSession(r, w))
+                await sess.initialize()
+                tools = await load_mcp_tools(sess)
+                all_tools.extend(tools)
+                print(f"  {_c(GREEN, '[+]')} Worker '{wa.name}' → {[t.name for t in tools]}")
+            except Exception as exc:
+                print(f"  {_c(RED, '[!]')} Worker '{wa.name}' failed: {exc}")
+
+        for mc in config.mcp_clients:
             try:
-                from langchain_google_genai import ChatGoogleGenerativeAI
-            except ImportError:
-                pass
-
-            print(f"\n{_c(GREY, '[*] Connecting to worker agents and tools...')}")
-
-            all_tools = []
-            async with AsyncExitStack() as stack:
-                for wa in config.worker_agents:
-                    try:
-                        params = StdioServerParameters(
-                            command=wa.command, args=wa.args, env=wa.env or None
-                        )
-                        r, w = await stack.enter_async_context(stdio_client(params))
-                        sess = await stack.enter_async_context(ClientSession(r, w))
-                        await sess.initialize()
-                        tools = await load_mcp_tools(sess)
-                        all_tools.extend(tools)
-                        print(f"  {_c(GREEN, '[+]')} Worker '{wa.name}' → {[t.name for t in tools]}")
-                    except Exception as exc:
-                        print(f"  {_c(RED, '[!]')} Worker '{wa.name}' failed: {exc}")
-
-                for mc in config.mcp_clients:
-                    try:
-                        params = StdioServerParameters(
-                            command=mc.command, args=mc.args, env=mc.env or None
-                        )
-                        r, w = await stack.enter_async_context(stdio_client(params))
-                        sess = await stack.enter_async_context(ClientSession(r, w))
-                        await sess.initialize()
-                        tools = await load_mcp_tools(sess)
-                        all_tools.extend(tools)
-                        print(f"  {_c(GREEN, '[+]')} MCP '{mc.name}' → {[t.name for t in tools]}")
-                    except Exception as exc:
-                        print(f"  {_c(RED, '[!]')} MCP '{mc.name}' failed: {exc}")
-
-                if not all_tools:
-                    print(f"  {_c(YELLOW, '[~]')} No tools connected — running LLM-only.")
-
-                # Build LLM
-                provider = config.model.provider.lower()
-                if provider == "openai":
-                    llm = ChatOpenAI(
-                        model=config.model.model_name,
-                        temperature=config.model.temperature,
-                        api_key=config.model.api_key,
-                        base_url=(
-                            config.model.base_url
-                            if config.model.base_url != "http://localhost:11434"
-                            else None
-                        ),
-                    )
-                elif provider == "gemini":
-                    llm = ChatGoogleGenerativeAI(
-                        model=config.model.model_name,
-                        temperature=config.model.temperature,
-                        api_key=config.model.api_key,
-                    )
-                else:
-                    llm = ChatOllama(
-                        model=config.model.model_name,
-                        temperature=config.model.temperature,
-                        base_url=config.model.base_url,
-                    )
-
-                graph = create_react_agent(model=llm, tools=all_tools)
-
-                tool_desc = "\n".join(
-                    f"  - {t.name}: {getattr(t, 'description', '')}" for t in all_tools
+                params = StdioServerParameters(
+                    command=mc.command, args=mc.args, env=mc.env or None
                 )
-                sys_prompt = config.agent.system_prompt + (
-                    f"\n\nAvailable tools:\n{tool_desc}" if tool_desc else ""
+                r, w = await _stack.enter_async_context(stdio_client(params))
+                sess = await _stack.enter_async_context(ClientSession(r, w))
+                await sess.initialize()
+                tools = await load_mcp_tools(sess)
+                all_tools.extend(tools)
+                print(f"  {_c(GREEN, '[+]')} MCP '{mc.name}' → {[t.name for t in tools]}")
+            except Exception as exc:
+                print(f"  {_c(RED, '[!]')} MCP '{mc.name}' failed: {exc}")
+
+        if not all_tools:
+            print(f"  {_c(YELLOW, '[~]')} No tools connected (besides memory) — running LLM-only.")
+
+        # ----------------------------------------------------------------
+        # PHASE 2.5 — Add memory tools so LLM can query/save explicitly
+        # ----------------------------------------------------------------
+        if config.memory.enabled:
+            from core.memory import get_backend as _get_backend
+            from pathlib import Path as _Path
+            _mem_dir = _Path(config.memory.memory_dir)
+            if not _mem_dir.is_absolute():
+                _mem_dir = _Path(__file__).parent / config.memory.memory_dir
+            try:
+                backend = _get_backend(
+                    backend_type=config.memory.backend,
+                    memory_dir=_mem_dir,
+                    max_save_length=config.memory.max_save_length,
+                    rag_server_cfg=config.memory.rag_server,
                 )
-                messages = [SystemMessage(content=sys_prompt), HumanMessage(content=task)]
+                from langchain_core.tools import tool as lc_tool
+                
+                @lc_tool
+                def memory_search(query: str, category: Literal["all", "history", "facts"] = "all") -> str:
+                    """
+                    Search your long-term memory for past tasks and results related to *query*.
+                    Use category="history" for looking up past tool executions and workflows.
+                    Use category="facts" for looking up saved notes, preferences, or project details.
+
+                    args:
+                        query (str): The search query.
+                        category (Literal["all", "history", "facts"]): The category to search in. Defaults to "all".
+                    """
+                    return backend.search(query, category=category)
+
+                @lc_tool
+                def memory_save(fact: str) -> str:
+                    """Save an important fact or note to your long-term memory for future sessions.
+
+                    args:
+                        fact (str): The fact to save.
+                    """
+                    return backend.save_fact(fact)
+
+                all_tools.extend([memory_search, memory_save])
+                print(f"  {_c(GREEN, '[+]')} Memory → ['memory_search', 'memory_save'] (backend={config.memory.backend})")
+            except Exception as _mem_exc:
+                print(f"  {_c(RED, '[!]')} Memory tools failed to load: {_mem_exc}")
+
+        # Build LLM
+        provider = config.model.provider.lower()
+        if provider == "openai":
+            llm = ChatOpenAI(
+                model=config.model.model_name,
+                temperature=config.model.temperature,
+                api_key=config.model.api_key,
+                base_url=(
+                    config.model.base_url
+                    if config.model.base_url != "http://localhost:11434"
+                    else None
+                ),
+            )
+        elif provider == "gemini":
+            llm = ChatGoogleGenerativeAI(
+                model=config.model.model_name,
+                temperature=config.model.temperature,
+                api_key=config.model.api_key,
+            )
+        else:
+            llm = ChatOllama(
+                model=config.model.model_name,
+                temperature=config.model.temperature,
+                base_url=config.model.base_url,
+            )
+
+        graph = create_react_agent(model=llm, tools=all_tools)
+
+        tool_desc = "\n".join(
+            f"  - {t.name}: {getattr(t, 'description', '')}" for t in all_tools
+        )
+        sys_prompt = config.agent.system_prompt + (
+            f"\n\nAvailable tools:\n{tool_desc}" if tool_desc else ""
+        )
+
+        # ── Persistent conversation history (survives across turns) ───────────
+        conversation_history: list = [SystemMessage(content=sys_prompt)]
+        current_summary: str = ""       # rolling narrative; updated each compression cycle
+        known_facts: list[str] = []     # full reconciled fact list; replaced each cycle
+
+        # ── Summarizer (optional; gracefully disabled if not configured) ───────
+        from core.conversation_summarizer import ConversationSummarizer
+        summarizer = (
+            ConversationSummarizer(config.summarizer, config.model)
+            if config.summarizer.enabled
+            else None
+        )
+
+        # ── REPL loop ─────────────────────────────────────────────────────────
+        while True:
+            try:
+                task = input(f"\n{_c(BOLD, '>> Task:')} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n\nExiting.")
+                break
+
+            if not task:
+                continue
+            if task.lower() in {"quit", "exit", "q"}:
+                print("Exiting.")
+                break
+
+            try:
+                # Append the new user message to running history
+                conversation_history.append(HumanMessage(content=task))
+
+                # Inject known_facts into the system prompt for the current turn
+                if conversation_history and isinstance(conversation_history[0], SystemMessage):
+                    dynamic_sys = sys_prompt
+                    if known_facts:
+                        facts_str = "\n".join(f"- {f}" for f in known_facts)
+                        dynamic_sys += f"\n\n[Session Known Facts]\n{facts_str}"
+                    conversation_history[0] = SystemMessage(content=dynamic_sys)
 
                 print(f"\n{_c(BOLD, '[Task]')} {task}\n" + "─" * 60)
                 final_answer = ""
 
-                async for event in graph.astream({"messages": messages}, stream_mode="values"):
+                async for event in graph.astream({"messages": conversation_history}, stream_mode="values"):
                     _print_event(event)
                     last = event["messages"][-1]
                     if hasattr(last, "content") and last.content:
                         final_answer = last.content
 
-            print("\n" + "─" * 60)
-            if isinstance(final_answer, list):
-                final_answer = "\n".join(
-                    b.get("text", str(b)) if isinstance(b, dict) else str(b)
-                    for b in final_answer
-                )
-            print(f"\n{_c(BOLD, '[Final Answer]')}\n{final_answer}")
-            print("─" * 60)
+                # Append the assistant's reply to history so next turn sees it
+                if final_answer:
+                    ai_reply = final_answer
+                    if isinstance(ai_reply, list):
+                        ai_reply = "\n".join(
+                            b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                            for b in ai_reply
+                        )
+                    conversation_history.append(_AIMessage(content=ai_reply))
 
-        except Exception as exc:
-            print(f"\n{_c(RED, '[ERROR]')} {exc}")
-            logger.exception("interactive_loop task failed")
+                # ── Rolling summarization ─────────────────────────────────────
+                if summarizer and summarizer.should_summarize(conversation_history):
+                    orig_len = len(conversation_history)
+                    result = await summarizer.summarize(
+                        history=conversation_history,
+                        prev_summary=current_summary,
+                        known_facts=known_facts,
+                    )
+                    conversation_history = result.trimmed_history
+                    current_summary = result.summary         # replace with updated narrative
+                    known_facts = result.facts               # replace entirely (handles corrections)
+
+                    if config.summarizer.save_to_memory:
+                        # Import here to avoid circular dep at module level
+                        from core.memory import get_backend as _get_backend
+                        from pathlib import Path as _Path
+                        _mem_cfg = config.memory
+                        _mem_dir = _Path(_mem_cfg.memory_dir)
+                        if not _mem_dir.is_absolute():
+                            _mem_dir = _Path(__file__).parent / _mem_cfg.memory_dir
+                        try:
+                            _backend = _get_backend(
+                                backend_type=_mem_cfg.backend,
+                                memory_dir=_mem_dir,
+                                max_save_length=_mem_cfg.max_save_length,
+                            )
+                            _backend.save_fact(f"[Session summary] {result.summary}")
+                            for fact in result.new_or_changed:  # only new/changed
+                                _backend.save_fact(fact)
+                        except Exception as _mem_exc:
+                            logger.warning("[Summarizer] Could not persist to memory: %s", _mem_exc)
+
+                    compressed = orig_len - len(conversation_history)
+                    print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
+                                   f"{len(result.new_or_changed)} new/changed facts saved. "
+                                   f"Total facts known: {len(known_facts)}."))
+
+                print("\n" + "─" * 60)
+                if isinstance(final_answer, list):
+                    final_answer = "\n".join(
+                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                        for b in final_answer
+                    )
+                print(f"\n{_c(BOLD, '[Final Answer]')}\n{final_answer}")
+                print("─" * 60)
+
+            except Exception as exc:
+                print(f"\n{_c(RED, '[ERROR]')} {exc}")
+                logger.exception("interactive_loop task failed")
+                # Remove the failed user message so history stays consistent
+                if conversation_history and isinstance(conversation_history[-1], HumanMessage):
+                    conversation_history.pop()
+
+    finally:
+        await _stack.__aexit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------

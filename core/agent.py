@@ -249,24 +249,8 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
                     )
 
             # ----------------------------------------------------------------
-            # PHASE 2.5 — Add memory tools so LLM can query/save explicitly
+            # Check availability of tools
             # ----------------------------------------------------------------
-            if mem_cfg.enabled and backend is not None:
-                from langchain_core.tools import tool as lc_tool
-
-                @lc_tool
-                def memory_search(query: str) -> str:
-                    """Search your long-term memory for past tasks and results related to *query*."""
-                    return backend.search(query)
-
-                @lc_tool
-                def memory_save(fact: str) -> str:
-                    """Save an important fact or note to your long-term memory for future sessions."""
-                    return backend.save_fact(fact)
-
-                all_tools.extend([memory_search, memory_save])
-                logger.info("[Memory] Added memory_search and memory_save tools (backend=%s).", mem_cfg.backend)
-
             if not all_tools:
                 jl.log_step(
                     step_type="INFO",
@@ -341,7 +325,7 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
                 len(all_tools),
                 [t.name for t in all_tools],
             )
-
+            logger.info("enriched_prompt: %s", enriched_prompt)
             # ----------------------------------------------------------------
             # PHASE 4 — Run the ReAct loop + log every event
             # ----------------------------------------------------------------

@@ -1,0 +1,10 @@
+memory/memory.jsonl
+memory/memory.db
+
+# Test scripts
+test_memory_rag.py
+
+# Python caches
+__pycache__/
+*.pyc
+.venv/

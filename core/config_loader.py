@@ -66,6 +66,13 @@ class AgentConfig:
 
 
 @dataclass
+class RagServerConfig:
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    collection: str = "agent_memory"
+
+
+@dataclass
 class MemoryConfig:
     """Long-term memory settings."""
     enabled: bool = True
@@ -73,6 +80,27 @@ class MemoryConfig:
     memory_dir: str = "./memory"
     max_context_entries: int = 10
     max_save_length: int = 500
+    rag_server: RagServerConfig = field(default_factory=RagServerConfig)
+
+
+@dataclass
+class SummarizerModelConfig:
+    """LLM settings for the summarizer (can be a lighter model than the main orchestrator)."""
+    provider: str = "ollama"
+    model_name: str = "llama3.2"
+    temperature: float = 0.0
+    base_url: str = "http://localhost:11434"
+    api_key: str | None = None
+
+
+@dataclass
+class SummarizerConfig:
+    """Controls when and how conversation history is compressed."""
+    enabled: bool = True
+    summarize_every_n_messages: int = 8 # Run the summarizer exactly every N messages
+    keep_recent_messages: int = 6       # Leave this many recent messages untouched
+    save_to_memory: bool = True         # Save summary and facts to long-term memory
+    model: SummarizerModelConfig = field(default_factory=SummarizerModelConfig)
 
 
 @dataclass
@@ -82,6 +110,7 @@ class AppConfig:
     worker_agents: list[WorkerAgentConfig] = field(default_factory=list)
     mcp_clients: list[MCPClientConfig] = field(default_factory=list)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +203,36 @@ def load_config(config_path: str | None = None) -> AppConfig:
 
     # --- Memory ---
     mem_raw = raw.get("memory", {})
+    rag_raw = mem_raw.get("rag_server", {})
     memory = MemoryConfig(
         enabled=bool(mem_raw.get("enabled", True)),
         backend=mem_raw.get("backend", "jsonl"),
         memory_dir=mem_raw.get("memory_dir", "./memory"),
         max_context_entries=int(mem_raw.get("max_context_entries", 10)),
         max_save_length=int(mem_raw.get("max_save_length", 500)),
+        rag_server=RagServerConfig(
+            command=rag_raw.get("command", ""),
+            args=rag_raw.get("args", []),
+            collection=rag_raw.get("collection", "agent_memory"),
+        )
+    )
+
+    # --- Summarizer ---
+    sum_raw = raw.get("summarizer", {})
+    sum_model_raw = sum_raw.get("model", {})
+    # Fall back to main model config if summarizer model block is empty
+    summarizer = SummarizerConfig(
+        enabled=bool(sum_raw.get("enabled", True)),
+        summarize_every_n_messages=int(sum_raw.get("summarize_every_n_messages", 8)),
+        keep_recent_messages=int(sum_raw.get("keep_recent_messages", 6)),
+        save_to_memory=bool(sum_raw.get("save_to_memory", True)),
+        model=SummarizerModelConfig(
+            provider=sum_model_raw.get("provider", model.provider),
+            model_name=sum_model_raw.get("model_name", model.model_name),
+            temperature=float(sum_model_raw.get("temperature", 0.0)),
+            base_url=sum_model_raw.get("base_url", model.base_url),
+            api_key=sum_model_raw.get("api_key", model.api_key),
+        ),
     )
 
     return AppConfig(
@@ -188,4 +241,5 @@ def load_config(config_path: str | None = None) -> AppConfig:
         worker_agents=worker_agents,
         mcp_clients=mcp_clients,
         memory=memory,
+        summarizer=summarizer,
     )

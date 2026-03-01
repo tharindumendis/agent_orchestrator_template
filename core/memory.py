@@ -63,8 +63,10 @@ class MemoryBackend(ABC):
         """Persist a job memory entry."""
 
     @abstractmethod
-    def search(self, query: str, top_k: int = 5) -> str:
-        """Search memory and return a formatted result string."""
+    def search(self, query: str, top_k: int = 5, category: str = "all") -> str:
+        """Search memory and return a formatted result string.
+        category can be 'all', 'history', or 'facts'.
+        """
 
     @abstractmethod
     def save_fact(self, fact: str) -> str:
@@ -183,10 +185,16 @@ class JsonlMemoryBackend(MemoryBackend):
         self._append(entry)
         logger.info("[Memory:jsonl] Saved job %s → %s", job_id, self._file)
 
-    def search(self, query: str, top_k: int = 5) -> str:
+    def search(self, query: str, top_k: int = 5, category: str = "all") -> str:
         entries = self._all()
         if not entries:
             return "No memories stored yet."
+
+        if category == "facts":
+            entries = [e for e in entries if e.get("outcome") == "note"]
+        elif category == "history":
+            entries = [e for e in entries if e.get("outcome") != "note"]
+
         hits = sorted(
             [(self._score(e, query), e) for e in entries],
             key=lambda x: x[0],
@@ -194,7 +202,7 @@ class JsonlMemoryBackend(MemoryBackend):
         )
         hits = [e for sc, e in hits[:top_k] if sc > 0]
         if not hits:
-            return f"No memories found matching '{query}'."
+            return f"No memories found matching '{query}' in category '{category}'."
         return self.build_context(hits)
 
     def save_fact(self, fact: str) -> str:
@@ -216,6 +224,7 @@ def get_backend(
     backend_type: str = "jsonl",
     memory_dir: str | Path = "./memory",
     max_save_length: int = 500,
+    rag_server_cfg=None,
 ) -> MemoryBackend:
     """
     Return the requested MemoryBackend instance.
@@ -228,13 +237,16 @@ def get_backend(
             memory_dir=memory_dir,
             max_save_length=max_save_length,
         )
-    # -- future backends --
-    # elif t == "sqlite":
-    #     from core.memory_sqlite import SqliteMemoryBackend
-    #     return SqliteMemoryBackend(memory_dir=memory_dir, ...)
-    # elif t == "rag":
-    #     from core.memory_rag import RagMemoryBackend
-    #     return RagMemoryBackend(memory_dir=memory_dir, ...)
+    elif t == "sqlite":
+        from core.memory_sqlite import SqliteMemoryBackend
+        return SqliteMemoryBackend(memory_dir=memory_dir, max_save_length=max_save_length)
+    elif t == "rag":
+        from core.memory_rag import RagMemoryBackend
+        return RagMemoryBackend(
+            memory_dir=memory_dir,
+            max_save_length=max_save_length,
+            rag_server_cfg=rag_server_cfg
+        )
     else:
         logger.warning("[Memory] Unknown backend '%s', falling back to jsonl.", t)
         return JsonlMemoryBackend(memory_dir=memory_dir, max_save_length=max_save_length)

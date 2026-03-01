@@ -63,13 +63,13 @@ worker_agents:
 # them and uses their tools directly — no sub-agent loop involved.
 # =============================================================================
 mcp_clients:
-  - name: "rag_server"
-    command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
-    args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
+  # - name: "rag_server"
+  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
+  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
 
   - name: "filesystem"
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp"]
   #
   # - name: "brave-search"
   #   command: "npx"
@@ -90,7 +90,34 @@ mcp_clients:
 # =============================================================================
 memory:
   enabled: true
-  backend: "jsonl" # "jsonl" (default) | future: "sqlite" | "rag"
+  backend: "rag" # "jsonl" (default) | future: "sqlite" | "rag"
   memory_dir: "./memory" # relative to Agent_head directory
   max_context_entries: 10 # max past jobs injected into system prompt
   max_save_length: 500 # max chars stored per job summary
+
+  # Configure this if backend is set to "rag"
+  rag_server:
+    command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
+    args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
+    collection: "agent_memory"
+
+# =============================================================================
+# Conversation History Summarizer
+# When the REPL conversation history grows long, a lightweight LLM call
+# compresses old messages into a rolling summary + reconciled fact list.
+# Summary is injected back into history; new/changed facts are saved to memory.
+# =============================================================================
+summarizer:
+  enabled: true
+  summarize_every_n_messages: 4 # compress older items exactly every N messages
+  keep_recent_messages: 6 # keep this many recent messages untouched for context
+  save_to_memory: true # save facts and summaries to long-term memory
+
+  # Can be a cheaper/faster model than the main orchestrator.
+  # If omitted, falls back to the main model settings above.
+  model:
+    provider: "ollama"
+    model_name: "qwen3-coder:480b-cloud" # change to a lighter model if available
+    temperature: 0.0
+    base_url: "http://localhost:11434"
+    # api_key: ""
