@@ -32,6 +32,7 @@ from typing import Literal
 import logging
 import sys
 import warnings
+import os
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -133,7 +134,6 @@ async def run(
     Load config, optionally override model settings, then run the orchestrator.
     Returns the final answer string.
     """
-    import os
     if config_path:
         os.environ["ORCHESTRATOR_CONFIG"] = config_path
 
@@ -180,7 +180,6 @@ async def interactive_loop(
     api_key_override: str | None = None,
     base_url_override: str | None = None,
 ) -> None:
-    import os
     if config_path:
         os.environ["ORCHESTRATOR_CONFIG"] = config_path
     config = load_config(config_path)
@@ -232,6 +231,11 @@ async def interactive_loop(
                 sess = await _stack.enter_async_context(ClientSession(r, w))
                 await sess.initialize()
                 tools = await load_mcp_tools(sess)
+                
+                if wa.description:
+                    for t in tools:
+                        t.description = f"{wa.description.strip()}\n\nTool specific details: {t.description}"
+                        
                 all_tools.extend(tools)
                 print(f"  {_c(GREEN, '[+]')} Worker '{wa.name}' → {[t.name for t in tools]}")
             except Exception as exc:
@@ -299,31 +303,13 @@ async def interactive_loop(
             except Exception as _mem_exc:
                 print(f"  {_c(RED, '[!]')} Memory tools failed to load: {_mem_exc}")
 
-        # Build LLM
-        provider = config.model.provider.lower()
-        if provider == "openai":
-            llm = ChatOpenAI(
-                model=config.model.model_name,
-                temperature=config.model.temperature,
-                api_key=config.model.api_key,
-                base_url=(
-                    config.model.base_url
-                    if config.model.base_url != "http://localhost:11434"
-                    else None
-                ),
-            )
-        elif provider == "gemini":
-            llm = ChatGoogleGenerativeAI(
-                model=config.model.model_name,
-                temperature=config.model.temperature,
-                api_key=config.model.api_key,
-            )
-        else:
-            llm = ChatOllama(
-                model=config.model.model_name,
-                temperature=config.model.temperature,
-                base_url=config.model.base_url,
-            )
+        # Build Orchestrator LLM
+        from core.llm import get_llm
+        try:
+            llm = get_llm(config.model)
+        except ImportError as e:
+            print(f"  {_c(RED, '[!]')} {e}")
+            return
 
         graph = create_react_agent(model=llm, tools=all_tools)
 

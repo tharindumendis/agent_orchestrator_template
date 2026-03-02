@@ -39,12 +39,30 @@ model:
 # to them automatically, then uses their execute_task tool to delegate work.
 # =============================================================================
 worker_agents:
-  # - name: "agent_a"
-  #   description: "General-purpose worker agent with shell execution tools."
-  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a\\.venv\\Scripts\\python.exe"
-  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_a\\main.py"]
-  # env:
-  #   WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a\\config.yaml"
+  - name: "GithubAgent"
+    description: "Github specialist worker agent."
+    command: "uv"
+    args:
+      [
+        "run",
+        "--directory",
+        "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a",
+        "main.py",
+      ]
+    env:
+      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custome_config\\agent_github_config.yaml"
+  - name: "CommunicationAgent"
+    description: "Communication specialist worker agent."
+    command: "uv"
+    args:
+      [
+        "run",
+        "--directory",
+        "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a",
+        "main.py",
+      ]
+    env:
+      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custome_config\\agent_communication_config.yaml"
 
   # Add more workers below by cloning Agent_a and pointing here:
   # - name: "code_worker"
@@ -97,9 +115,17 @@ memory:
 
   # Configure this if backend is set to "rag"
   rag_server:
-    command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
-    args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
+    command: "uvx"
+    args:
+      [
+        "--refresh",
+        "--from",
+        "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag",
+        "agent-rag",
+      ]
     collection: "agent_memory"
+    env:
+      RAG_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custome_config\\rag_config.yaml"
 
 # =============================================================================
 # Conversation History Summarizer

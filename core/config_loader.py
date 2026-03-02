@@ -70,6 +70,7 @@ class RagServerConfig:
     command: str = ""
     args: list[str] = field(default_factory=list)
     collection: str = "agent_memory"
+    env: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -214,6 +215,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
             command=rag_raw.get("command", ""),
             args=rag_raw.get("args", []),
             collection=rag_raw.get("collection", "agent_memory"),
+            env=rag_raw.get("env", {}),
         )
     )
 

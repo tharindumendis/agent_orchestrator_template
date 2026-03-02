@@ -169,6 +169,11 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
                     )
                     await session.initialize()
                     tools = await load_mcp_tools(session)
+                    
+                    if wa_cfg.description:
+                        for t in tools:
+                            t.description = f"{wa_cfg.description.strip()}\n\nTool specific details: {t.description}"
+                            
                     tool_names = [t.name for t in tools]
                     all_tools.extend(tools)
 
@@ -281,30 +286,18 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
                 f"\n\nAvailable tools:\n{tool_descriptions}" if tool_descriptions else ""
             )
 
-            provider = config.model.provider.lower()
-            if provider == "openai":
-                llm = ChatOpenAI(
-                    model=config.model.model_name,
-                    temperature=config.model.temperature,
-                    api_key=config.model.api_key,
-                    base_url=(
-                        config.model.base_url
-                        if config.model.base_url != "http://localhost:11434"
-                        else None
-                    ),
+            try:
+                from core.llm import get_llm
+                llm = get_llm(config.model)
+            except ImportError as e:
+                logger.error("LLM init failed: %s", e)
+                jl.log_step(
+                    step_type="AGENT_INIT",
+                    title="Agent init failed",
+                    details={"error": str(e)},
+                    success=False
                 )
-            elif provider == "gemini":
-                llm = ChatGoogleGenerativeAI(
-                    model=config.model.model_name,
-                    temperature=config.model.temperature,
-                    api_key=config.model.api_key,
-                )
-            else:
-                llm = ChatOllama(
-                    model=config.model.model_name,
-                    temperature=config.model.temperature,
-                    base_url=config.model.base_url,
-                )
+                return
 
             graph = create_react_agent(model=llm, tools=all_tools)
 

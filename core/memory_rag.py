@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import Future
+import os
 
 from core.memory import MemoryBackend
 
@@ -28,9 +29,16 @@ class SyncRagMCPClient:
     A synchronous wrapper around the asynchronous MCP stdio client.
     Spawns the RAG server subprocess and exposes its tools synchronously.
     """
-    def __init__(self, command: str, args: list[str]):
+    def __init__(self, command: str, args: list[str], env: dict | None = None):
         self._command = command
         self._args = args
+        
+        # Merge the basic OS environ with our custom overrides
+        cwd_env = dict(os.environ)
+        if env:
+            cwd_env.update(env)
+        self._env = cwd_env
+        
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._ready_event = threading.Event()
@@ -55,7 +63,7 @@ class SyncRagMCPClient:
             params = StdioServerParameters(
                 command=self._command,
                 args=self._args,
-                env=None,
+                env=self._env,
             )
 
             self._exit_stack = AsyncExitStack()
@@ -110,7 +118,8 @@ class RagMemoryBackend(MemoryBackend):
         # Initialise the background MCP client once
         self._mcp = SyncRagMCPClient(
             command=rag_server_cfg.command,
-            args=rag_server_cfg.args
+            args=rag_server_cfg.args,
+            env=rag_server_cfg.env,
         )
         self._col_history = f"{rag_server_cfg.collection}_history"
         self._col_facts = f"{rag_server_cfg.collection}_facts"
