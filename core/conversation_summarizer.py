@@ -54,10 +54,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SummaryResult:
-    summary: str               # updated narrative paragraph
-    facts: list[str]           # FULL updated fact list (additions + corrections; replaces known_facts)
-    new_or_changed: list[str]  # subset: facts that are new or changed vs. prev (persist to storage)
-    trimmed_history: list      # ready-to-use replacement for conversation_history
+    summary: str                 # updated narrative paragraph
+    global_facts: list[str]      # FULL updated global fact list
+    private_facts: list[str]     # FULL updated private fact list
+    new_global_facts: list[str]  # subset: global facts that are new or changed
+    new_private_facts: list[str] # subset: private facts that are new or changed
+    trimmed_history: list        # ready-to-use replacement for conversation_history
 
 
 # ---------------------------------------------------------------------------
@@ -79,11 +81,7 @@ Your task is to help maintain concise, accurate memory across a long conversatio
 === PREVIOUS SUMMARY ===
 {prev_summary}
 
-=== CURRENT KNOWN FACTS ===
-{known_facts_block}
-(These may be added to, corrected, or removed if the conversation contradicts them.)
-
-=== NEW MESSAGES TO INCORPORATE ===
+=== RECENT MESSAGES TO INCORPORATE ===
 {messages_block}
 
 Produce exactly the following format:
@@ -91,10 +89,15 @@ Produce exactly the following format:
 SUMMARY:
 <An updated 2-4 sentence narrative combining the previous summary with the new messages.>
 
-UPDATED FACTS:
-- <The complete, reconciled list of facts. Include all previous facts that are still true, correct any that changed, add new ones. One fact per line.>
-- <another fact>
-(Write "none" on a single line if there are genuinely no facts at all.)
+NEW GLOBAL FACTS:
+- <Only facts introduced in the recent messages>
+- <Domain rules, technical knowledge, general world knowledge>
+(Write "none" on a single line if there are no new global facts to add.)
+
+NEW PRIVATE FACTS:
+- <Only facts introduced in the recent messages>
+- <User names, personal preferences, project paths, specific session context>
+(Write "none" on a single line if there are no new private facts to add.)
 """
 
     def __init__(self, summarizer_cfg, main_model_cfg):
@@ -146,21 +149,24 @@ UPDATED FACTS:
         self,
         history: list,
         prev_summary: str = "",
-        known_facts: list[str] | None = None,
+        known_global_facts: list[str] | None = None,
+        known_private_facts: list[str] | None = None,
     ) -> SummaryResult:
         """
         Compress the oldest messages in *history* into an updated rolling
         summary and a list of NEW facts.
 
         Args:
-            history      – full conversation_history list (SystemMessage at [0])
-            prev_summary – narrative from previous summarization cycle (or "")
-            known_facts  – facts already extracted in earlier cycles
+            history             – full conversation_history list (SystemMessage at [0])
+            prev_summary        – narrative from previous summarization cycle (or "")
+            known_global_facts  – global facts already extracted in earlier cycles
+            known_private_facts – private facts already extracted in earlier cycles
 
         Returns:
             SummaryResult with updated summary, new-only facts, and trimmed history.
         """
-        known_facts = known_facts or []
+        known_global_facts = known_global_facts or []
+        known_private_facts = known_private_facts or []
 
         # Split history: pin SystemMessage(s), keep last N raw, compress the rest
         system_msgs = [m for m in history if isinstance(m, SystemMessage)]
@@ -175,39 +181,32 @@ UPDATED FACTS:
             logger.warning("[Summarizer] should_summarize returned True but nothing to compress.")
             return SummaryResult(
                 summary=prev_summary,
-                facts=known_facts,
-                new_or_changed=[],
+                global_facts=known_global_facts,
+                private_facts=known_private_facts,
+                new_global_facts=[],
+                new_private_facts=[],
                 trimmed_history=history,
             )
 
         # Serialise messages to compress into plain text
         messages_block = self._messages_to_text(to_compress)
 
-        # Serialise known facts
-        known_facts_block = (
-            "\n".join(f"- {f}" for f in known_facts)
-            if known_facts
-            else "(none yet)"
-        )
-
         # Build the prompt
         prompt = self._PROMPT_TEMPLATE.format(
             prev_summary=prev_summary or "(none yet)",
-            known_facts_block=known_facts_block,
             messages_block=messages_block,
         )
 
         logger.info(
-            "[Summarizer] Compressing %d messages (keep last %d). Known facts: %d.",
-            len(to_compress), self._keep, len(known_facts),
+            "[Summarizer] Compressing %d messages (keep last %d).",
+            len(to_compress), self._keep
         )
 
         # Call the summarizer LLM (plain invoke, not ReAct)
         model_id = f"{self._llm.__class__.__name__}"
         print(
             f"\n\033[90m[Summarizer] Calling LLM ({model_id}) — "
-            f"compressing {len(to_compress)} msgs, "
-            f"{len(known_facts)} facts known...\033[0m"
+            f"compressing {len(to_compress)} msgs into rolling summary and fact deltas...\033[0m"
         )
         try:
             response = await self._llm.ainvoke(prompt)
@@ -217,17 +216,19 @@ UPDATED FACTS:
             # Graceful degradation: return history unchanged
             return SummaryResult(
                 summary=prev_summary,
-                facts=known_facts,
-                new_or_changed=[],
+                global_facts=known_global_facts,
+                private_facts=known_private_facts,
+                new_global_facts=[],
+                new_private_facts=[],
                 trimmed_history=history,
             )
 
-        # Parse SUMMARY and UPDATED FACTS sections
-        summary, updated_facts = self._parse_response(raw_text)
+        # Parse sections
+        summary, new_global_facts, new_private_facts = self._parse_response(raw_text)
 
-        # Compute delta: facts that are new or changed vs. known_facts
-        known_set = set(known_facts)
-        new_or_changed = [f for f in updated_facts if f not in known_set]
+        # We append the new facts to the running known lists (for backward compatibility if needed)
+        global_facts = known_global_facts + new_global_facts
+        private_facts = known_private_facts + new_private_facts
 
         # Build trimmed history: pinned SystemMsg(s) + summary AIMessage + recent raw msgs
         trimmed = list(system_msgs)
@@ -236,14 +237,16 @@ UPDATED FACTS:
         trimmed.extend(to_keep)
 
         logger.info(
-            "[Summarizer] Done. Summary: %d chars. Facts total: %d (new/changed: %d).",
-            len(summary), len(updated_facts), len(new_or_changed),
+            "[Summarizer] Done. Summary: %d chars. Global Facts: %d (new: %d), Private Facts: %d (new: %d).",
+            len(summary), len(global_facts), len(new_global_facts), len(private_facts), len(new_private_facts)
         )
 
         return SummaryResult(
             summary=summary,
-            facts=updated_facts,          # full list — caller replaces known_facts
-            new_or_changed=new_or_changed, # only persisted to storage
+            global_facts=global_facts,
+            private_facts=private_facts,
+            new_global_facts=new_global_facts,
+            new_private_facts=new_private_facts,
             trimmed_history=trimmed,
         )
 
@@ -278,39 +281,54 @@ UPDATED FACTS:
         return str(content)
 
     @staticmethod
-    def _parse_response(text: str) -> tuple[str, list[str]]:
+    def _parse_response(text: str) -> tuple[str, list[str], list[str]]:
         """
-        Parse the LLM response for SUMMARY: and UPDATED FACTS: sections.
+        Parse the LLM response for SUMMARY:, GLOBAL FACTS:, and PRIVATE FACTS: sections.
         Robust to minor formatting variations.
         """
         summary = ""
-        facts: list[str] = []
+        global_facts: list[str] = []
+        private_facts: list[str] = []
 
         # Extract SUMMARY section
         summary_match = re.search(
-            r"SUMMARY:\s*(.*?)(?=\nUPDATED FACTS:|$)",
+            r"SUMMARY:\s*(.*?)(?=\nNEW GLOBAL FACTS:|$)",
             text,
             re.DOTALL | re.IGNORECASE,
         )
         if summary_match:
             summary = summary_match.group(1).strip()
 
-        # Extract UPDATED FACTS section
-        facts_match = re.search(
-            r"UPDATED FACTS:\s*(.*?)$",
+        # Extract GLOBAL FACTS section
+        global_facts_match = re.search(
+            r"NEW GLOBAL FACTS:\s*(.*?)(?=\nNEW PRIVATE FACTS:|$)",
             text,
             re.DOTALL | re.IGNORECASE,
         )
-        if facts_match:
-            raw_facts = facts_match.group(1).strip()
+        if global_facts_match:
+            raw_facts = global_facts_match.group(1).strip()
+            if raw_facts.lower() != "none" and raw_facts.lower() != "none.":
+                for line in raw_facts.splitlines():
+                    line = re.sub(r"^[-*•]\s*", "", line).strip()
+                    if line and line.lower() != "none":
+                        global_facts.append(line)
+
+        # Extract PRIVATE FACTS section
+        private_facts_match = re.search(
+            r"NEW PRIVATE FACTS:\s*(.*?)$",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if private_facts_match:
+            raw_facts = private_facts_match.group(1).strip()
             if raw_facts.lower() != "none":
                 for line in raw_facts.splitlines():
                     line = re.sub(r"^[-*•]\s*", "", line).strip()
                     if line and line.lower() != "none":
-                        facts.append(line)
+                        private_facts.append(line)
 
         # Fallback: if parsing failed, treat entire response as summary
         if not summary:
             summary = text.strip()
 
-        return summary, facts
+        return summary, global_facts, private_facts

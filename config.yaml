@@ -6,6 +6,7 @@
 agent:
   name: "OrchestratorAgent"
   version: "1.0.0"
+  debug: true
   description: |
     Main autonomous orchestrator that coordinates specialist worker agents
     and direct MCP tool servers to complete complex, multi-step goals.
@@ -50,7 +51,7 @@ worker_agents:
         "main.py",
       ]
     env:
-      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custome_config\\agent_github_config.yaml"
+      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\agent_github_config.yaml"
   - name: "CommunicationAgent"
     description: "Communication specialist worker agent."
     command: "uv"
@@ -62,7 +63,7 @@ worker_agents:
         "main.py",
       ]
     env:
-      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custome_config\\agent_communication_config.yaml"
+      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\agent_communication_config.yaml"
 
   # Add more workers below by cloning Agent_a and pointing here:
   # - name: "code_worker"
@@ -112,20 +113,24 @@ memory:
   memory_dir: "./memory" # relative to Agent_head directory
   max_context_entries: 10 # max past jobs injected into system prompt
   max_save_length: 500 # max chars stored per job summary
+  auto_feed_top_k: 3 # how many relevant chunks (per category) to auto-inject into prompts
+  auto_feed_category: "all" # "all", "history", or "facts" (for task-based bots)
 
   # Configure this if backend is set to "rag"
   rag_server:
-    command: "uvx"
-    args:
-      [
-        "--refresh",
-        "--from",
-        "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag",
-        "agent-rag",
-      ]
+    command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
+    args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
     collection: "agent_memory"
     env:
-      RAG_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custome_config\\rag_config.yaml"
+      RAG_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\rag_config.yaml"
+
+# =============================================================================
+# Chat History Interface (Session persistence)
+# Supports swapping the continuous message storage backend (sqlite, mysql, mongo, etc.)
+# =============================================================================
+chat_history:
+  backend: "sqlite" # currently supports: "sqlite"
+  connection_string: "sessions.db" # relative to memory_dir, or absolute path
 
 # =============================================================================
 # Conversation History Summarizer
@@ -135,8 +140,8 @@ memory:
 # =============================================================================
 summarizer:
   enabled: true
-  summarize_every_n_messages: 4 # compress older items exactly every N messages
-  keep_recent_messages: 6 # keep this many recent messages untouched for context
+  summarize_every_n_messages: 2 # compress older items exactly every N messages
+  keep_recent_messages: 4 # keep this many recent messages untouched for context
   save_to_memory: true # save facts and summaries to long-term memory
 
   # Can be a cheaper/faster model than the main orchestrator.

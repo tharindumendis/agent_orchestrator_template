@@ -41,10 +41,8 @@ try:
 except ImportError:
     pass
 
-from langchain_mcp_adapters.tools import load_mcp_tools
+from core.mcp_loader import load_mcp_server_tools
 from langgraph.prebuilt import create_react_agent
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 from core.config_loader import AppConfig
 from core.job_logger import JobLogger
@@ -91,7 +89,7 @@ def _content_to_str(content) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def run_orchestrator(task: str, config: AppConfig) -> str:
+async def run_orchestrator(task: str, config: AppConfig, session_id: str | None = None) -> str:
     """
     Execute a high-level task using the orchestrator's ReAct loop.
 
@@ -131,17 +129,34 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
         mem_dir = Path(__file__).parent.parent / mem_cfg.memory_dir
 
     memory_context = ""
+    backend = None
     if mem_cfg.enabled:
         try:
             backend = get_backend(
                 backend_type=mem_cfg.backend,
                 memory_dir=mem_dir,
                 max_save_length=mem_cfg.max_save_length,
+                rag_server_cfg=mem_cfg.rag_server,
             )
-            past = backend.load_relevant(task=task, n=mem_cfg.max_context_entries)
-            if past:
-                memory_context = backend.build_context(past)
-                logger.info("[Memory] Injecting %d past memories into prompt.", len(past))
+            
+            # -- Auto-Inject RAG Context directly into User Prompt --
+            if mem_cfg.auto_feed_top_k > 0:
+                context_str = backend.search(
+                    task, 
+                    category=mem_cfg.auto_feed_category,
+                    session_id=session_id
+                )
+                
+                MAX_CONTEXT_CHARS = 4000
+                if len(context_str) > MAX_CONTEXT_CHARS:
+                    context_str = context_str[:MAX_CONTEXT_CHARS] + "\n...[truncated]"
+                    
+                if context_str.strip() and "No relevant" not in context_str:
+                    logger.info("Auto-injected %d chars of memory context for task.", len(context_str))
+                    # we modify the local `task` var so the graph gets the enriched prompt below
+                    jl.log_step("AGENT_INIT", "Memory auto-injected", details={"chars": len(context_str)})
+                    task = f"[System: Relevant Past Memory]\n{context_str}\n\n[User Task]\n{task}"
+                    
         except Exception as exc:
             logger.warning("[Memory] Failed to load memories: %s", exc)
             backend = None
@@ -155,25 +170,14 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
             # PHASE 1 — Connect to worker agents (MCP servers)
             # ----------------------------------------------------------------
             for wa_cfg in config.worker_agents:
-                server_params = StdioServerParameters(
-                    command=wa_cfg.command,
-                    args=wa_cfg.args,
-                    env=wa_cfg.env or None,
-                )
                 try:
-                    read, write = await stack.enter_async_context(
-                        stdio_client(server_params)
+                    tools = await load_mcp_server_tools(
+                        stack,
+                        command=wa_cfg.command,
+                        args=wa_cfg.args,
+                        env=wa_cfg.env or None,
+                        description_override=wa_cfg.description,
                     )
-                    session: ClientSession = await stack.enter_async_context(
-                        ClientSession(read, write)
-                    )
-                    await session.initialize()
-                    tools = await load_mcp_tools(session)
-                    
-                    if wa_cfg.description:
-                        for t in tools:
-                            t.description = f"{wa_cfg.description.strip()}\n\nTool specific details: {t.description}"
-                            
                     tool_names = [t.name for t in tools]
                     all_tools.extend(tools)
 
@@ -209,20 +213,13 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
             # PHASE 2 — Connect to direct MCP tool servers
             # ----------------------------------------------------------------
             for client_cfg in config.mcp_clients:
-                server_params = StdioServerParameters(
-                    command=client_cfg.command,
-                    args=client_cfg.args,
-                    env=client_cfg.env or None,
-                )
                 try:
-                    read, write = await stack.enter_async_context(
-                        stdio_client(server_params)
+                    tools = await load_mcp_server_tools(
+                        stack,
+                        command=client_cfg.command,
+                        args=client_cfg.args,
+                        env=client_cfg.env or None,
                     )
-                    session = await stack.enter_async_context(
-                        ClientSession(read, write)
-                    )
-                    await session.initialize()
-                    tools = await load_mcp_tools(session)
                     tool_names = [t.name for t in tools]
                     all_tools.extend(tools)
 
@@ -326,6 +323,24 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
                 SystemMessage(content=enriched_prompt),
                 HumanMessage(content=task),
             ]
+
+            # --- Debug Logger ---
+            if config.agent.debug:
+                try:
+                    import json
+                    from langchain_core.messages import messages_to_dict
+                    
+                    log_dir = Path("logs/runs")
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    debug_log_path = log_dir / f"{jl.job_id}.log"
+                    
+                    with open(debug_log_path, "w", encoding="utf-8") as f:
+                        f.write(f"=== Single-Shot Job: {jl.job_id} ===\n\n")
+                        f.write(f"\n--- [START] PROMPT FED TO LLM ---\n")
+                        f.write(json.dumps(messages_to_dict(messages), indent=2))
+                        f.write("\n\n")
+                except Exception as e:
+                    logger.error("Failed to write to debug log: %s", e)
 
             _logged_tool_calls: set = set()
             _llm_step = 0
@@ -450,6 +465,7 @@ async def run_orchestrator(task: str, config: AppConfig) -> str:
                     summary=final_answer or "Job failed with no output.",
                     tools_used=_tools_used,
                     outcome="success" if success else "failed",
+                    session_id=session_id,
                 )
             except Exception as exc:
                 logger.warning("[Memory] Failed to save memory: %s", exc)

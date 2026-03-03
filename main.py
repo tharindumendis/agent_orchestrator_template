@@ -33,6 +33,7 @@ import logging
 import sys
 import warnings
 import os
+import time
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -129,6 +130,7 @@ async def run(
     provider_override: str | None = None,
     api_key_override: str | None = None,
     base_url_override: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Load config, optionally override model settings, then run the orchestrator.
@@ -153,7 +155,7 @@ async def run(
     print(f"\n{_c(BOLD, '[Task]')} {task}\n")
     print("─" * 60)
 
-    answer = await run_orchestrator(task=task, config=config)
+    answer = await run_orchestrator(task=task, config=config, session_id=session_id)
     return answer
 
 
@@ -179,6 +181,7 @@ async def interactive_loop(
     provider_override: str | None = None,
     api_key_override: str | None = None,
     base_url_override: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     if config_path:
         os.environ["ORCHESTRATOR_CONFIG"] = config_path
@@ -202,9 +205,7 @@ async def interactive_loop(
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as _AIMessage
     from langgraph.prebuilt import create_react_agent
     from contextlib import AsyncExitStack
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    from langchain_mcp_adapters.tools import load_mcp_tools
+    from core.mcp_loader import load_mcp_server_tools
     from langchain_ollama import ChatOllama
     try:
         from langchain_openai import ChatOpenAI
@@ -224,18 +225,13 @@ async def interactive_loop(
     try:
         for wa in config.worker_agents:
             try:
-                params = StdioServerParameters(
-                    command=wa.command, args=wa.args, env=wa.env or None
+                tools = await load_mcp_server_tools(
+                    _stack,
+                    command=wa.command,
+                    args=wa.args,
+                    env=wa.env or None,
+                    description_override=wa.description
                 )
-                r, w = await _stack.enter_async_context(stdio_client(params))
-                sess = await _stack.enter_async_context(ClientSession(r, w))
-                await sess.initialize()
-                tools = await load_mcp_tools(sess)
-                
-                if wa.description:
-                    for t in tools:
-                        t.description = f"{wa.description.strip()}\n\nTool specific details: {t.description}"
-                        
                 all_tools.extend(tools)
                 print(f"  {_c(GREEN, '[+]')} Worker '{wa.name}' → {[t.name for t in tools]}")
             except Exception as exc:
@@ -243,13 +239,12 @@ async def interactive_loop(
 
         for mc in config.mcp_clients:
             try:
-                params = StdioServerParameters(
-                    command=mc.command, args=mc.args, env=mc.env or None
+                tools = await load_mcp_server_tools(
+                    _stack,
+                    command=mc.command,
+                    args=mc.args,
+                    env=mc.env or None
                 )
-                r, w = await _stack.enter_async_context(stdio_client(params))
-                sess = await _stack.enter_async_context(ClientSession(r, w))
-                await sess.initialize()
-                tools = await load_mcp_tools(sess)
                 all_tools.extend(tools)
                 print(f"  {_c(GREEN, '[+]')} MCP '{mc.name}' → {[t.name for t in tools]}")
             except Exception as exc:
@@ -261,6 +256,7 @@ async def interactive_loop(
         # ----------------------------------------------------------------
         # PHASE 2.5 — Add memory tools so LLM can query/save explicitly
         # ----------------------------------------------------------------
+        backend = None   # shared instance; also used by summarizer saves below
         if config.memory.enabled:
             from core.memory import get_backend as _get_backend
             from pathlib import Path as _Path
@@ -291,7 +287,11 @@ async def interactive_loop(
 
                 @lc_tool
                 def memory_save(fact: str) -> str:
-                    """Save an important fact or note to your long-term memory for future sessions.
+                    """
+                    Save an important global fact or note to your long-term memory for future sessions.
+                    DO STORE INFORMATION THAT WILL NEED FOR FUTURE TASKS.
+                    YOU MUST:
+                    DO NOT STORE ANY PRIVATE OR SENSITIVE INFORMATIONS.
 
                     args:
                         fact (str): The fact to save.
@@ -313,17 +313,57 @@ async def interactive_loop(
 
         graph = create_react_agent(model=llm, tools=all_tools)
 
-        tool_desc = "\n".join(
-            f"  - {t.name}: {getattr(t, 'description', '')}" for t in all_tools
-        )
-        sys_prompt = config.agent.system_prompt + (
-            f"\n\nAvailable tools:\n{tool_desc}" if tool_desc else ""
-        )
+        # tool_desc = "\n".join(
+        #     f"  - {t.name}: {getattr(t, 'description', '')}" for t in all_tools
+        # )
+        # sys_prompt = config.agent.system_prompt + (
+        #     f"\n\nAvailable tools:\n{tool_desc}" if tool_desc else ""
+        # )
 
         # ── Persistent conversation history (survives across turns) ───────────
-        conversation_history: list = [SystemMessage(content=sys_prompt)]
-        current_summary: str = ""       # rolling narrative; updated each compression cycle
-        known_facts: list[str] = []     # full reconciled fact list; replaced each cycle
+        sys_prompt = config.agent.system_prompt 
+        conversation_history: list = []
+        
+        session_manager = None
+        if session_id:
+            if config.chat_history.backend == "sqlite":
+                from core.history_sqlite import SqliteConversationHistory
+                from pathlib import Path
+                _db_str = config.chat_history.connection_string
+                _db_path = Path(_db_str)
+                if not _db_path.is_absolute():
+                    _mem_dir = Path(config.memory.memory_dir)
+                    if not _mem_dir.is_absolute():
+                        _mem_dir = Path(__file__).parent / config.memory.memory_dir
+                    _db_path = _mem_dir / _db_str
+                session_manager = SqliteConversationHistory(db_path=_db_path)
+            else:
+                logger.warning("Unsupported chat_history backend: %s", config.chat_history.backend)
+            
+            history = session_manager.load_session(session_id)
+            if history:
+                conversation_history = history
+                print(f"  {_c(GREEN, '[+]')} Resumed Session: '{session_id}' ({len(history)} messages)")
+                
+        if not conversation_history:
+            conversation_history = [SystemMessage(content=sys_prompt)]
+
+        current_summary: str = ""             # rolling narrative; updated each compression cycle
+        known_global_facts: list[str] = []    # full reconciled global fact list
+        known_private_facts: list[str] = []   # full reconciled private fact list
+
+        # ── Debug Logger ───────────────────────────────────────────────────────
+        debug_log_path = None
+        if config.agent.debug:
+            from pathlib import Path
+            from datetime import datetime
+            log_dir = Path("logs/runs")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            # Use session_id if resumed, else generate a fresh timestamp
+            sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+            debug_log_path = log_dir / f"{sess_name}.log"
+            with open(debug_log_path, "a", encoding="utf-8") as f:
+                f.write(f"=== Session Booted: {sess_name} ===\n\n")
 
         # ── Summarizer (optional; gracefully disabled if not configured) ───────
         from core.conversation_summarizer import ConversationSummarizer
@@ -348,19 +388,45 @@ async def interactive_loop(
                 break
 
             try:
-                # Append the new user message to running history
-                conversation_history.append(HumanMessage(content=task))
+                # --- Auto-Inject RAG Context ---
+                if config.memory.enabled and config.memory.auto_feed_top_k > 0:
+                    try:
+                        # Grab the backend initialized earlier in PHASE 2.5
+                        context_str = backend.search(
+                            task, 
+                            category=config.memory.auto_feed_category,
+                            session_id=session_id
+                        )
+                        
+                        # We do a basic split/truncate to avoid huge windows.
+                        # For RAG, each backend might format differently, but a raw character limit is safe.
+                        MAX_CONTEXT_CHARS = 4000
+                        if len(context_str) > MAX_CONTEXT_CHARS:
+                            context_str = context_str[:MAX_CONTEXT_CHARS] + "\n...[truncated]"
+                            
+                        if context_str.strip() and "No relevant" not in context_str:
+                            print(f"  {_c(GREY, '[~]')} Auto-injected {len(context_str)} chars of memory context.")
+                            task = f"[System: Relevant Past Memory]\n{context_str}\n\n[User Task]\n{task}"
+                    except Exception as e:
+                        logger.warning(f"Failed to auto-fetch RAG context: {e}")
 
-                # Inject known_facts into the system prompt for the current turn
-                if conversation_history and isinstance(conversation_history[0], SystemMessage):
-                    dynamic_sys = sys_prompt
-                    if known_facts:
-                        facts_str = "\n".join(f"- {f}" for f in known_facts)
-                        dynamic_sys += f"\n\n[Session Known Facts]\n{facts_str}"
-                    conversation_history[0] = SystemMessage(content=dynamic_sys)
+                # Append the (potentially enriched) new user message to running history
+                conversation_history.append(HumanMessage(content=task))
 
                 print(f"\n{_c(BOLD, '[Task]')} {task}\n" + "─" * 60)
                 final_answer = ""
+
+                # --- Write exact LLM prompt to debug log ---
+                if debug_log_path:
+                    try:
+                        import json
+                        from langchain_core.messages import messages_to_dict
+                        with open(debug_log_path, "a", encoding="utf-8") as f:
+                            f.write(f"\n--- [TURN] PROMPT FED TO LLM ---\n")
+                            f.write(json.dumps(messages_to_dict(conversation_history), indent=2))
+                            f.write("\n\n")
+                    except Exception as e:
+                        logger.error(f"Failed to write to debug log: {e}")
 
                 async for event in graph.astream({"messages": conversation_history}, stream_mode="values"):
                     _print_event(event)
@@ -378,42 +444,58 @@ async def interactive_loop(
                         )
                     conversation_history.append(_AIMessage(content=ai_reply))
 
+                # Save the persistent session to SQLite if active
+                if session_manager and session_id:
+                    session_manager.save_session(session_id, conversation_history)
+
                 # ── Rolling summarization ─────────────────────────────────────
                 if summarizer and summarizer.should_summarize(conversation_history):
                     orig_len = len(conversation_history)
                     result = await summarizer.summarize(
                         history=conversation_history,
                         prev_summary=current_summary,
-                        known_facts=known_facts,
+                        known_global_facts=known_global_facts,
+                        known_private_facts=known_private_facts,
                     )
                     conversation_history = result.trimmed_history
                     current_summary = result.summary         # replace with updated narrative
-                    known_facts = result.facts               # replace entirely (handles corrections)
+                    known_global_facts = result.global_facts # replace entirely (handles corrections)
+                    known_private_facts = result.private_facts
 
-                    if config.summarizer.save_to_memory:
-                        # Import here to avoid circular dep at module level
-                        from core.memory import get_backend as _get_backend
-                        from pathlib import Path as _Path
-                        _mem_cfg = config.memory
-                        _mem_dir = _Path(_mem_cfg.memory_dir)
-                        if not _mem_dir.is_absolute():
-                            _mem_dir = _Path(__file__).parent / _mem_cfg.memory_dir
+                    # Update the persistent session to SQLite with the newly trimmed history
+                    if session_manager and session_id:
+                        session_manager.save_session(session_id, conversation_history)
+
+                    if config.summarizer.save_to_memory and backend is not None:
+                        # Reuse the SAME backend instance (and therefore the same RAG
+                        # server subprocess) that handles auto-inject search above.
+                        # Creating a second backend here would spawn a second RAG server
+                        # process writing to the same ChromaDB files simultaneously —
+                        # that causes ChromaDB HNSW 'Error finding id' race conditions.
                         try:
-                            _backend = _get_backend(
-                                backend_type=_mem_cfg.backend,
-                                memory_dir=_mem_dir,
-                                max_save_length=_mem_cfg.max_save_length,
+                            # Save the session narrative into the isolated history namespace
+                            backend.save(
+                                job_id=f"summary_{int(time.time())}",
+                                task="Rolling Session Summary",
+                                summary=result.summary,
+                                session_id=session_id
                             )
-                            _backend.save_fact(f"[Session summary] {result.summary}")
-                            for fact in result.new_or_changed:  # only new/changed
-                                _backend.save_fact(fact)
+                            # Save factual learnings into the global facts namespace
+                            for fact in result.new_global_facts:
+                                backend.save_fact(fact, is_global=True)
+
+                            # Save private factual learnings
+                            for fact in result.new_private_facts:
+                                backend.save_fact(fact, is_global=False, session_id=session_id)
                         except Exception as _mem_exc:
                             logger.warning("[Summarizer] Could not persist to memory: %s", _mem_exc)
 
                     compressed = orig_len - len(conversation_history)
+                    new_facts_count = len(result.new_global_facts) + len(result.new_private_facts)
+                    total_facts_known = len(known_global_facts) + len(known_private_facts)
                     print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
-                                   f"{len(result.new_or_changed)} new/changed facts saved. "
-                                   f"Total facts known: {len(known_facts)}."))
+                                   f"{new_facts_count} new/changed facts saved. "
+                                   f"Total facts known: {total_facts_known}."))
 
                 print("\n" + "─" * 60)
                 if isinstance(final_answer, list):
@@ -454,6 +536,8 @@ Examples:
     )
     p.add_argument("--task", "-t", type=str, default=None,
                    help="Run a single task non-interactively and exit.")
+    p.add_argument("--session", "-s", type=str, default=None,
+                   help="Resume or start a persistent session by ID.")
     p.add_argument("--config", "-c", type=str, default=None,
                    help="Path to a custom config.yaml.")
     p.add_argument("--model", "-m", type=str, default=None,
@@ -480,6 +564,7 @@ def _cli_entry() -> None:
         provider_override=args.provider,
         api_key_override=args.api_key,
         base_url_override=args.base_url,
+        session_id=args.session,
     )
 
     if args.task:

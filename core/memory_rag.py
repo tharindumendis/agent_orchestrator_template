@@ -28,6 +28,13 @@ class SyncRagMCPClient:
     """
     A synchronous wrapper around the asynchronous MCP stdio client.
     Spawns the RAG server subprocess and exposes its tools synchronously.
+
+    Thread-safety note:
+        All tool calls are serialized via _call_lock. This prevents a
+        stale-read race where a search() for Turn N+1 executes before the
+        save() from Turn N has fully completed on the MCP server.
+        Without this lock, both calls are submitted to the asyncio loop nearly
+        simultaneously and the loop may run them in either order.
     """
     def __init__(self, command: str, args: list[str], env: dict | None = None):
         self._command = command
@@ -44,6 +51,9 @@ class SyncRagMCPClient:
         self._ready_event = threading.Event()
         self._session = None
         self._exit_stack = None
+        # ── Serialise all tool calls so writes are always visible to the
+        #    next read, regardless of which thread triggers each call. ──────
+        self._call_lock = threading.Lock()
         self._thread.start()
         self._ready_event.wait(timeout=10.0)
         if self._session is None:
@@ -79,30 +89,31 @@ class SyncRagMCPClient:
             self._ready_event.set()
 
     def call_tool_sync(self, name: str, arguments: dict) -> str:
-        """Call a tool synchronously by dispatching to the background loop."""
-        q = queue.Queue()
-        
-        async def _call():
+        """
+        Call a tool synchronously by dispatching to the background loop.
+
+        Acquires _call_lock so concurrent callers (e.g. a save() from a
+        LangGraph node and a search() from the next conversation turn) are
+        strictly ordered — one finishes completely before the next starts.
+        """
+        if not self._session:
+            return "ERROR: MCP session not initialized."
+
+        with self._call_lock:
+            future = asyncio.run_coroutine_threadsafe(
+                self._session.call_tool(name, arguments),
+                self._loop
+            )
             try:
-                result = await self._session.call_tool(name, arguments)
-                text = result.content[0].text if result.content else ""
-                q.put(("ok", text))
+                result = future.result(timeout=60.0)
+                return result.content[0].text if result.content else ""
+            except asyncio.TimeoutError:
+                logger.error("[Memory:rag] Tool call '%s' timed out after 60s", name)
+                return "ERROR: timeout"
             except Exception as e:
-                q.put(("err", e))
-                
-        # Schedule the coroutine in the background loop safely
-        self._loop.call_soon_threadsafe(lambda: self._loop.create_task(_call()))
-        
-        # Wait for the result synchronously (with timeout)
-        try:
-            status, value = q.get(timeout=30.0)
-            if status == "err":
-                logger.error("[Memory:rag] Tool call '%s' failed: %s", name, value)
-                return f"ERROR: {value}"
-            return value
-        except queue.Empty:
-            logger.error("[Memory:rag] Tool call '%s' timed out after 30s", name)
-            return "ERROR: timeout"
+                logger.error("[Memory:rag] Tool call '%s' failed: %s", name, e)
+                return f"ERROR: {e}"
+
 
 
 class RagMemoryBackend(MemoryBackend):
@@ -128,27 +139,6 @@ class RagMemoryBackend(MemoryBackend):
 
     # ── MemoryBackend interface ────────────────────────────────────────
 
-    def load_relevant(self, task: str, n: int = 10) -> list[dict]:
-        """
-        Uses rag_search to find relevant history.
-        """
-        raw_result = self._mcp.call_tool_sync(
-            "rag_search",
-            {"query": task, "collection": self._col_history, "top_k": n}
-        )
-        
-        if "No results found" in raw_result or "ERROR" in raw_result:
-            return []
-            
-        return [{
-            "job_id": "rag-search",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "task": f"RAG Search Results for: {task[:50]}...",
-            "summary": raw_result,
-            "tools_used": ["rag_search"],
-            "outcome": "rag_result"
-        }]
-
     def save(
         self,
         job_id: str,
@@ -156,9 +146,11 @@ class RagMemoryBackend(MemoryBackend):
         summary: str,
         tools_used: list[str] | None = None,
         outcome: str = "success",
+        session_id: str | None = None,
     ) -> None:
         """
         Ingests the job record into the RAG collection as a text string.
+        If session_id is provided, the history is isolated to that session's namespace.
         """
         entry = {
             "job_id": job_id,
@@ -175,38 +167,68 @@ class RagMemoryBackend(MemoryBackend):
             f"Tools used: {', '.join(entry['tools_used']) or 'none'}"
         )
         
+        target_col = self._col_history
+        metadata = {"session_id": session_id} if session_id else {}
         self._mcp.call_tool_sync(
             "rag_ingest",
-            {"source": text_content, "collection": self._col_history}
+            {"source": text_content, "collection": target_col, "metadata": metadata}
         )
-        logger.info("[Memory:rag] Saved job %s to collection %s", job_id, self._col_history)
+        logger.info("[Memory:rag] Saved job %s to collection %s (session_id: %s)", job_id, target_col, session_id)
 
-    def search(self, query: str, top_k: int = 5, category: str = "all") -> str:
+    def search(self, query: str, top_k: int = 5, category: str = "all", session_id: str | None = None) -> str:
         """Call rag_search on the targeted collection(s)."""
-        if category == "facts":
-            return self._mcp.call_tool_sync("rag_search", {"query": query, "collection": self._col_facts, "top_k": top_k})
-        elif category == "history":
-            return self._mcp.call_tool_sync("rag_search", {"query": query, "collection": self._col_history, "top_k": top_k})
-        else:
-            # Combine both if category is "all"
-            h_res = self._mcp.call_tool_sync("rag_search", {"query": query, "collection": self._col_history, "top_k": max(1, top_k//2)})
-            f_res = self._mcp.call_tool_sync("rag_search", {"query": query, "collection": self._col_facts, "top_k": max(1, top_k//2)})
-            
-            combined = []
-            if "No results" not in h_res and "ERROR" not in h_res:
-                combined.append(f"=== HISTORY RESULTS ===\n{h_res}")
-            if "No results" not in f_res and "ERROR" not in f_res:
-                combined.append(f"=== FACTS RESULTS ===\n{f_res}")
-            
-            if not combined:
-                return f"No results found matching '{query}' across any memory collections."
-            return "\n\n".join(combined)
+        history_col = self._col_history
+        facts_col = self._col_facts
+        
+        metadata_filter = {"session_id": session_id} if session_id else None
 
-    def save_fact(self, fact: str) -> str:
-        text_content = f"[EXPLICIT FACT] {fact}"
+        combined = []
+        
+        # Helper to search and append
+        def _search_append(col: str, title: str, k: int, m_filter: dict | None = None):
+            if not col: return
+            args = {"query": query, "collection": col, "top_k": k}
+            if m_filter:
+                args["metadata_filter"] = m_filter
+                
+            res = self._mcp.call_tool_sync("rag_search", args)
+            if "No results" not in res and "ERROR" not in res:
+                combined.append(f"=== {title} ===\n{res}")
+            else:
+                print(f"[DEBUG RAG] {title} suppressed: {res}")
+
+        if category == "facts":
+            _search_append(self._col_facts, "GLOBAL FACTS", top_k, m_filter={"is_global": "true"})
+            if metadata_filter:
+                m_filter_priv = {"$and": [{"is_global": "false"}, metadata_filter]}
+                _search_append(self._col_facts, "PRIVATE FACTS", top_k, m_filter=m_filter_priv)
+        elif category == "history":
+            _search_append(history_col, "HISTORY RESULTS", top_k, m_filter=metadata_filter)
+        else:
+            # Combine all if category is "all"
+            k_half = max(1, top_k//2)
+            _search_append(history_col, "HISTORY RESULTS", k_half, m_filter=metadata_filter)
+            _search_append(self._col_facts, "GLOBAL FACTS", k_half, m_filter={"is_global": "true"})
+            if metadata_filter:
+                m_filter_priv = {"$and": [{"is_global": "false"}, metadata_filter]}
+                _search_append(self._col_facts, "PRIVATE FACTS", k_half, m_filter=m_filter_priv)
+            
+        if not combined:
+            return f"No results found matching '{query}' across any memory collections."
+        return "\n\n".join(combined)
+
+    def save_fact(self, fact: str, is_global: bool = True, session_id: str | None = None) -> str:
+        text_content = f"[{'GLOBAL' if is_global else 'PRIVATE'} FACT] {fact}"
+        target_col = self._col_facts
+        
+        metadata = {"is_global": "true" if is_global else "false"}
+        if not is_global and session_id:
+            metadata["session_id"] = session_id
+
         result = self._mcp.call_tool_sync(
             "rag_ingest",
-            {"source": text_content, "collection": self._col_facts}
+            {"source": text_content, "collection": target_col, "metadata": metadata}
         )
-        logger.info("[Memory:rag] Saved fact to RAG.")
-        return f"Fact saved to RAG memory: {fact[:100]}"
+        scope = "global" if is_global else f"private({session_id})"
+        logger.info(f"[Memory:rag] Saved {scope} fact to RAG.")
+        return f"Fact saved to RAG memory ({scope}): {fact[:100]}"

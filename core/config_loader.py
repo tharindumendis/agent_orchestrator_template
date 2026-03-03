@@ -57,6 +57,7 @@ class MCPClientConfig:
 class AgentConfig:
     name: str = "OrchestratorAgent"
     version: str = "1.0.0"
+    debug: bool = False
     description: str = "Main orchestrator agent that coordinates sub-worker agents."
     system_prompt: str = (
         "You are a powerful autonomous orchestrator agent.\n"
@@ -81,7 +82,15 @@ class MemoryConfig:
     memory_dir: str = "./memory"
     max_context_entries: int = 10
     max_save_length: int = 500
+    auto_feed_top_k: int = 3
+    auto_feed_category: str = "all"
     rag_server: RagServerConfig = field(default_factory=RagServerConfig)
+
+
+@dataclass
+class ChatHistoryConfig:
+    backend: str = "sqlite"
+    connection_string: str = "sessions.db"
 
 
 @dataclass
@@ -111,6 +120,7 @@ class AppConfig:
     worker_agents: list[WorkerAgentConfig] = field(default_factory=list)
     mcp_clients: list[MCPClientConfig] = field(default_factory=list)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    chat_history: ChatHistoryConfig = field(default_factory=ChatHistoryConfig)
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
 
 
@@ -159,6 +169,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
     agent = AgentConfig(
         name=agent_raw.get("name", "OrchestratorAgent"),
         version=agent_raw.get("version", "1.0.0"),
+        debug=bool(agent_raw.get("debug", False)),
         description=agent_raw.get("description", "Main orchestrator agent."),
         system_prompt=agent_raw.get(
             "system_prompt",
@@ -211,6 +222,8 @@ def load_config(config_path: str | None = None) -> AppConfig:
         memory_dir=mem_raw.get("memory_dir", "./memory"),
         max_context_entries=int(mem_raw.get("max_context_entries", 10)),
         max_save_length=int(mem_raw.get("max_save_length", 500)),
+        auto_feed_top_k=int(mem_raw.get("auto_feed_top_k", 3)),
+        auto_feed_category=mem_raw.get("auto_feed_category", "all"),
         rag_server=RagServerConfig(
             command=rag_raw.get("command", ""),
             args=rag_raw.get("args", []),
@@ -237,11 +250,19 @@ def load_config(config_path: str | None = None) -> AppConfig:
         ),
     )
 
+    # --- Chat History ---
+    chat_raw = raw.get("chat_history", {})
+    chat_history = ChatHistoryConfig(
+        backend=chat_raw.get("backend", "sqlite"),
+        connection_string=chat_raw.get("connection_string", "sessions.db")
+    )
+
     return AppConfig(
         agent=agent,
         model=model,
         worker_agents=worker_agents,
         mcp_clients=mcp_clients,
         memory=memory,
+        chat_history=chat_history,
         summarizer=summarizer,
     )

@@ -48,10 +48,6 @@ logger = logging.getLogger(__name__)
 class MemoryBackend(ABC):
 
     @abstractmethod
-    def load_relevant(self, task: str, n: int = 10) -> list[dict]:
-        """Return up to *n* memory entries most relevant to *task*."""
-
-    @abstractmethod
     def save(
         self,
         job_id: str,
@@ -59,6 +55,7 @@ class MemoryBackend(ABC):
         summary: str,
         tools_used: list[str] | None = None,
         outcome: str = "success",
+        session_id: str | None = None,
     ) -> None:
         """Persist a job memory entry."""
 
@@ -69,32 +66,8 @@ class MemoryBackend(ABC):
         """
 
     @abstractmethod
-    def save_fact(self, fact: str) -> str:
+    def save_fact(self, fact: str, is_global: bool = True, session_id: str | None = None) -> str:
         """Save an explicit user/LLM note to memory."""
-
-    # ------------------------------------------------------------------
-    # Non-abstract helper — shared by all backends
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def build_context(entries: list[dict]) -> str:
-        """Format memory entries for system prompt injection."""
-        if not entries:
-            return ""
-        lines = ["=== Long-Term Memory (past sessions) ==="]
-        for e in entries:
-            ts      = e.get("ts", "")[:10]
-            task    = e.get("task", "?")[:120]
-            summary = e.get("summary", "?")[:200]
-            outcome = e.get("outcome", "?")
-            tools   = ", ".join(e.get("tools_used", [])) or "none"
-            lines.append(
-                f"[{ts}] [{outcome.upper()}] Task: {task}\n"
-                f"  Summary: {summary}\n"
-                f"  Tools used: {tools}"
-            )
-        lines.append("=== End of Memory ===")
-        return "\n".join(lines)
 
 
 # ===========================================================================
@@ -205,14 +178,16 @@ class JsonlMemoryBackend(MemoryBackend):
             return f"No memories found matching '{query}' in category '{category}'."
         return self.build_context(hits)
 
-    def save_fact(self, fact: str) -> str:
+    def save_fact(self, fact: str, is_global: bool = True, session_id: str | None = None) -> str:
+        scope = "global" if is_global else f"private({session_id})"
         self.save(
             job_id=f"fact-{uuid.uuid4().hex[:8]}",
-            task="[explicit-fact]",
+            task=f"[explicit-fact] scope:{scope}",
             summary=fact,
             outcome="note",
+            session_id=session_id,
         )
-        return f"Fact saved to memory: {fact[:100]}"
+        return f"Fact saved to memory ({scope}): {fact[:100]}"
 
 
 # ===========================================================================

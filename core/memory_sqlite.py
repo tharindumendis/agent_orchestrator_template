@@ -74,29 +74,6 @@ class SqliteMemoryBackend(MemoryBackend):
 
     # ── MemoryBackend interface ────────────────────────────────────────
 
-    def load_relevant(self, task: str, n: int = 10) -> list[dict]:
-        entries = self._all()
-        if not entries:
-            return []
-        scored = sorted(
-            entries,
-            key=lambda e: self._score(e, task),
-            reverse=True,
-        )
-        seen, result = set(), []
-        for e in scored[:n]:
-            jid = e.get("job_id", "")
-            if jid not in seen:
-                seen.add(jid)
-                result.append(e)
-        # Always include last 3 for recency
-        for e in reversed(entries[-3:]):
-            jid = e.get("job_id", "")
-            if jid not in seen and len(result) < n:
-                seen.add(jid)
-                result.append(e)
-        return result[:n]
-
     def save(
         self,
         job_id: str,

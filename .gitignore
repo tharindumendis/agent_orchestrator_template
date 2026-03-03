@@ -1,5 +1,4 @@
-memory/memory.jsonl
-memory/memory.db
+memory/
 chroma_db/
 custom_config/
 
@@ -8,6 +7,11 @@ test_memory_rag.py
 
 # Python caches
 __pycache__/
+__pycache__
 *.pyc
 .venv/
 
+test/
+logs/
+.env
+*.pyc
