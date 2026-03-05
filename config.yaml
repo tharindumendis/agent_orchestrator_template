@@ -52,18 +52,18 @@ worker_agents:
       ]
     env:
       WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\agent_github_config.yaml"
-  - name: "CommunicationAgent"
-    description: "Communication specialist worker agent."
-    command: "uv"
-    args:
-      [
-        "run",
-        "--directory",
-        "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a",
-        "main.py",
-      ]
-    env:
-      WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\agent_communication_config.yaml"
+  # - name: "CommunicationAgent"
+  #   description: "Communication specialist worker agent."
+  #   command: "uv"
+  #   args:
+  #     [
+  #       "run",
+  #       "--directory",
+  #       "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a",
+  #       "main.py",
+  #     ]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\agent_communication_config.yaml"
 
   # Add more workers below by cloning Agent_a and pointing here:
   # - name: "code_worker"
@@ -75,6 +75,20 @@ worker_agents:
   #   description: "Specialist worker for web research and summarisation."
   #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_research\\.venv\\Scripts\\python.exe"
   #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_research\\main.py"]
+
+# =============================================================================
+# Notification Server (optional)
+# Agent_head connects to this on startup in the background.
+# It polls configured MCP servers and streams change events as notifications.
+# When a change is detected, it is injected as an automatic task into the
+# REPL loop (or displayed as an alert if the agent is busy).
+# =============================================================================
+notify_server:
+  enabled: true
+  command: "python"
+  args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_notify\\server.py"]
+  env:
+    AGENT_NOTIFY_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_notify\\notify_config.yaml"
 
 # =============================================================================
 # Direct MCP Tool Servers
@@ -89,7 +103,24 @@ mcp_clients:
   - name: "filesystem"
     command: "npx"
     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp"]
-  #
+
+  # Telegram MCP — via published npm package (recommended)
+  - name: "telegram"
+    command: "npx"
+    args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
+    env:
+      TELEGRAM_API_ID: "36365905"
+      TELEGRAM_API_HASH: "6afc6693a4f79866868d635769c3f959"
+
+  # Telegram MCP — local dev path (fallback when working on the server code)
+  # - name: "telegram"
+  #   command: "node"
+  #   args:
+  #     ["D:\\DEV\\mcp\\universai\\orchestra\\telegram-mpc-server\\mcp-stdio.js"]
+  #   env:
+  #     TELEGRAM_API_ID: "36365905"
+  #     TELEGRAM_API_HASH: "6afc6693a4f79866868d635769c3f959"
+
   # - name: "brave-search"
   #   command: "npx"
   #   args: ["-y", "@modelcontextprotocol/server-brave-search"]

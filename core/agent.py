@@ -296,7 +296,13 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
                 )
                 return
 
-            graph = create_react_agent(model=llm, tools=all_tools)
+            graph = create_react_agent(
+                model=llm,
+                tools=all_tools,
+                # Return tool errors as ToolMessages so the LLM can recover,
+                # instead of raising and crashing the whole orchestration.
+                handle_tool_errors=True,
+            )
 
             jl.log_step(
                 step_type="AGENT_INIT",
@@ -345,62 +351,83 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
             _logged_tool_calls: set = set()
             _llm_step = 0
 
-            async for event in graph.astream(
-                {"messages": messages},
-                stream_mode="values",
-            ):
-                last_msg = event["messages"][-1]
+            try:
+                async for event in graph.astream(
+                    {"messages": messages},
+                    stream_mode="values",
+                ):
+                    last_msg = event["messages"][-1]
 
-                # ── AIMessage: LLM text or tool-call plan ─────────────────
-                if isinstance(last_msg, AIMessage):
-                    tool_calls = getattr(last_msg, "tool_calls", []) or []
+                    # ── AIMessage: LLM text or tool-call plan ─────────────────
+                    if isinstance(last_msg, AIMessage):
+                        tool_calls = getattr(last_msg, "tool_calls", []) or []
 
-                    if last_msg.content:
-                        _llm_step += 1
-                        content_str = _content_to_str(last_msg.content)
+                        if last_msg.content:
+                            _llm_step += 1
+                            content_str = _content_to_str(last_msg.content)
+                            jl.log_step(
+                                step_type="LLM_RESPONSE",
+                                title=f"Orchestrator turn {_llm_step}",
+                                output=_truncate(content_str),
+                            )
+                            final_answer = content_str
+
+                        for tc in tool_calls:
+                            tc_id = tc.get("id", "")
+                            if tc_id in _logged_tool_calls:
+                                continue
+                            _logged_tool_calls.add(tc_id)
+                            jl.log_step(
+                                step_type="TOOL_CALL",
+                                title=tc.get("name", "unknown"),
+                                details={
+                                    "tool": tc.get("name"),
+                                    "call_id": tc_id,
+                                    "input": _tool_input(tc),
+                                },
+                            )
+
+                    # ── ToolMessage: result came back ─────────────────────────
+                    elif isinstance(last_msg, ToolMessage):
+                        raw_content = last_msg.content or ""
+                        content_str = _content_to_str(raw_content)
+                        is_error = any(
+                            kw in content_str.lower()
+                            for kw in ("error", "exception", "traceback")
+                        )
+                        tool_name = getattr(last_msg, "name", "tool") or "tool"
+                        if tool_name not in _tools_used:
+                            _tools_used.append(tool_name)
                         jl.log_step(
-                            step_type="LLM_RESPONSE",
-                            title=f"Orchestrator turn {_llm_step}",
+                            step_type="TOOL_RESULT",
+                            title=getattr(last_msg, "name", "tool") or "tool",
+                            details={"call_id": getattr(last_msg, "tool_call_id", "")},
                             output=_truncate(content_str),
-                        )
-                        final_answer = content_str
-
-                    for tc in tool_calls:
-                        tc_id = tc.get("id", "")
-                        if tc_id in _logged_tool_calls:
-                            continue
-                        _logged_tool_calls.add(tc_id)
-                        jl.log_step(
-                            step_type="TOOL_CALL",
-                            title=tc.get("name", "unknown"),
-                            details={
-                                "tool": tc.get("name"),
-                                "call_id": tc_id,
-                                "input": _tool_input(tc),
-                            },
+                            success=not is_error,
+                            error=content_str if is_error else None,
                         )
 
-                # ── ToolMessage: result came back ─────────────────────────
-                elif isinstance(last_msg, ToolMessage):
-                    raw_content = last_msg.content or ""
-                    content_str = _content_to_str(raw_content)
-                    is_error = any(
-                        kw in content_str.lower()
-                        for kw in ("error", "exception", "traceback")
-                    )
-                    tool_name = getattr(last_msg, "name", "tool") or "tool"
-                    if tool_name not in _tools_used:
-                        _tools_used.append(tool_name)
-                    jl.log_step(
-                        step_type="TOOL_RESULT",
-                        title=getattr(last_msg, "name", "tool") or "tool",
-                        details={"call_id": getattr(last_msg, "tool_call_id", "")},
-                        output=_truncate(content_str),
-                        success=not is_error,
-                        error=content_str if is_error else None,
-                    )
-
-            success = True
+            except Exception as stream_exc:  # noqa: BLE001
+                # A tool raised an un-handled exception inside the stream.
+                # Log it, set it as the final answer so the caller sees it,
+                # and let the REPL continue instead of dying.
+                exc_name = type(stream_exc).__name__
+                exc_msg  = str(stream_exc)
+                jl.log_step(
+                    step_type="TOOL_ERROR",
+                    title=exc_name,
+                    error=exc_msg,
+                    success=False,
+                )
+                logger.error(
+                    "[%s] Tool raised unhandled error: %s — %s",
+                    config.agent.name, exc_name, exc_msg,
+                )
+                final_answer = f"Tool error ({exc_name}): {exc_msg}"
+                # success stays False — the finally block will handle memory save
+            else:
+                # Stream completed normally — no exception was raised
+                success = True
 
     except BaseException as root_exc:
         exc = _unwrap_exception(root_exc)

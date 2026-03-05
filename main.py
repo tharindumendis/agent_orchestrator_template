@@ -203,7 +203,7 @@ async def interactive_loop(
 
     # ── One-time setup: connect tools, build LLM + graph ──────────────────────
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as _AIMessage
-    from langgraph.prebuilt import create_react_agent
+    from langgraph.prebuilt import create_react_agent, ToolNode
     from contextlib import AsyncExitStack
     from core.mcp_loader import load_mcp_server_tools
     from langchain_ollama import ChatOllama
@@ -241,12 +241,14 @@ async def interactive_loop(
             try:
                 tools = await load_mcp_server_tools(
                     _stack,
+                    transport=mc.transport,
+                    url=mc.url,
                     command=mc.command,
                     args=mc.args,
                     env=mc.env or None
                 )
                 all_tools.extend(tools)
-                print(f"  {_c(GREEN, '[+]')} MCP '{mc.name}' → {[t.name for t in tools]}")
+                print(f"  {_c(GREEN, '[+]')} MCP '{mc.name}' ({mc.transport}) → {[t.name for t in tools]}")
             except Exception as exc:
                 print(f"  {_c(RED, '[!]')} MCP '{mc.name}' failed: {exc}")
 
@@ -311,7 +313,15 @@ async def interactive_loop(
             print(f"  {_c(RED, '[!]')} {e}")
             return
 
-        graph = create_react_agent(model=llm, tools=all_tools)
+        # Wrap tools in a ToolNode with error handling so that any ToolException
+        # (e.g. permission errors, API failures) is caught and returned to the
+        # agent as a ToolMessage instead of crashing the graph stream.
+        tool_node = ToolNode(all_tools, handle_tool_errors=True)
+
+        graph = create_react_agent(
+            model=llm,
+            tools=tool_node,
+        )
 
         # tool_desc = "\n".join(
         #     f"  - {t.name}: {getattr(t, 'description', '')}" for t in all_tools
@@ -373,10 +383,152 @@ async def interactive_loop(
             else None
         )
 
+        # ── Notification Listener (optional background task) ────────────────
+        notification_queue: asyncio.Queue = asyncio.Queue()
+        _notify_task: asyncio.Task | None = None
+
+        if config.notify_server.enabled and config.notify_server.command:
+            async def _run_notify_listener() -> None:
+                """Background: connects to Agent_notify; captures ctx.info() events via subclass."""
+                import os as _os
+                import json as _json
+                from mcp.client.session import ClientSession as _BaseMCPSession
+                from mcp import StdioServerParameters
+                from mcp.client.stdio import stdio_client
+
+                # ── Subclass: reliable notification capture via Python MRO ────
+                # Monkey-patching _received_notification fails because the SDK's
+                # message loop may resolve the method at startup (captured ref).
+                # A subclass guarantees our override is called — always.
+                _q = notification_queue
+
+                class _CapturingSession(_BaseMCPSession):
+                    async def _received_notification(self, notification):
+                        try:
+                            await super()._received_notification(notification)
+                        except Exception:
+                            pass
+
+                        # ── Unwrap root union type ─────────────────────────
+                        # The mcp SDK wraps notifications in a discriminated union.
+                        # The actual LoggingMessageNotification is in .root
+                        inner = getattr(notification, "root", notification)
+                        method = str(getattr(inner, "method", ""))
+                        if "message" not in method:
+                            return
+
+                        params_obj = getattr(inner, "params", None)
+                        if not params_obj:
+                            return
+
+                        data = getattr(params_obj, "data", None) or str(params_obj)
+                        try:
+                            parsed = _json.loads(data) if isinstance(data, str) else data
+                            if not isinstance(parsed, dict):
+                                return
+
+                            # "started" confirmation
+                            if parsed.get("type") == "started":
+                                print(
+                                    f"  {_c(GREEN, '[~]')} Agent_notify: "
+                                    f"{parsed.get('message', 'monitoring started')}",
+                                    flush=True,
+                                )
+                                return
+
+                            # Real change event
+                            if "change" in parsed:
+                                change  = parsed["change"]
+                                added   = change.get("added",   [])
+                                removed = change.get("removed", [])
+                                changed = change.get("changed", {})
+                                label   = f"{parsed.get('server')}/{parsed.get('tool')}"
+
+                                parts = []
+                                if added:   parts.append(f"+{len(added)} new")
+                                if removed: parts.append(f"-{len(removed)} removed")
+                                if changed and not added and not removed:
+                                    parts.append("updated")
+                                summary = ", ".join(parts) or "changed"
+
+                                # Print IMMEDIATELY — visible without pressing Enter
+                                print(f"\n  {_c(YELLOW, f'[🔔 LIVE] {label} — {summary}')}", flush=True)
+                                if added:
+                                    preview = _json.dumps(added[0], ensure_ascii=False)
+                                    print(f"  → {preview[:160]}", flush=True)
+
+                                # Queue for auto-task runner at top of REPL loop
+                                _q.put_nowait(parsed)
+
+                        except Exception as _pe:
+                            import sys as _sys
+                            print(f"  [Notify] parse error: {_pe}", file=_sys.stderr, flush=True)
+
+                # ── Connect ───────────────────────────────────────────────────
+                ns  = config.notify_server
+                env = {**_os.environ, **(ns.env or {})}
+                srv_params = StdioServerParameters(command=ns.command, args=ns.args, env=env)
+
+                try:
+                    async with stdio_client(srv_params) as (read, write):
+                        async with _CapturingSession(read, write) as _notify_session:
+                            await _notify_session.initialize()
+                            print(
+                                f"  {_c(GREEN, '[+]')} Notification listener connected → Agent_notify",
+                                flush=True,
+                            )
+                            await _notify_session.call_tool("get_notifications", {})
+                except asyncio.CancelledError:
+                    pass
+                except Exception as _ne:
+                    logger.warning("[Notify] Listener error: %s", _ne)
+
+            _notify_task = asyncio.create_task(_run_notify_listener())
+            # Yield so the task starts and prints '[+] connected' BEFORE first prompt
+            await asyncio.sleep(1.5)
+
         # ── REPL loop ─────────────────────────────────────────────────────────
         while True:
+            # ── Drain notification queue before prompting ──────────────────
+            while not notification_queue.empty():
+                notif = notification_queue.get_nowait()
+                change = notif.get("change", {})
+                server = notif.get("server", "?")
+                tool   = notif.get("tool", "?")
+                added  = change.get("added", [])
+                label  = f"{server}/{tool}"
+
+                print(f"\n{_c(YELLOW, f'[🔔 Notification] {label} — {len(added)} new item(s)')}")
+
+                if added:
+                    import json as _j
+                    auto_task = (
+                        f"[Auto-Task from {label}]\n"
+                        f"New items detected via notification:\n"
+                        f"{_j.dumps(added, indent=2)}\n\n"
+                        f"Analyse and act on these new items appropriately."
+                    )
+                    conversation_history.append(HumanMessage(content=auto_task))
+                    print(f"{_c(BOLD, '[Auto-Task]')} {auto_task[:120]}...\n" + "─" * 60)
+                    final_answer = ""
+                    async for event in graph.astream(
+                        {"messages": conversation_history}, stream_mode="values"
+                    ):
+                        _print_event(event)
+                        last = event["messages"][-1]
+                        if hasattr(last, "content") and last.content:
+                            final_answer = last.content
+                    if last_event is not None:
+                        conversation_history = list(event["messages"])
+                    print(f"\n{_c(BOLD, '[Auto-Answer]')}\n{final_answer}\n" + "─" * 60)
+
             try:
-                task = input(f"\n{_c(BOLD, '>> Task:')} ").strip()
+                # Use asyncio.to_thread so the event loop stays free while
+                # waiting for input — this lets the notification background
+                # task run concurrently instead of being starved.
+                task = (await asyncio.to_thread(
+                    input, f"\n{_c(BOLD, '>> Task:')} "
+                )).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n\nExiting.")
                 break
@@ -428,21 +580,37 @@ async def interactive_loop(
                     except Exception as e:
                         logger.error(f"Failed to write to debug log: {e}")
 
+                # ── Debug Logger For Prompts  ──────────────────────────────────────────
+                # debug_log_path = None
+                # if config.agent.debug:
+                #     from pathlib import Path
+                #     from datetime import datetime
+                #     log_prompt_dir = Path("logs/prompts")
+                #     log_prompt_dir.mkdir(parents=True, exist_ok=True)
+                #     # Use session_id if resumed, else generate a fresh timestamp
+                #     sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+                #     debug_log_prompt_path = log_prompt_dir / f"{sess_name}.log"
+                #     with open(debug_log_prompt_path, "a", encoding="utf-8") as f:
+                #         f.write(f"=== full prompt: {conversation_history} ===\n\n")
+                # ── Debug Logger For Prompts ───────────────────────────────────────────
+
+
+                last_event: dict | None = None
                 async for event in graph.astream({"messages": conversation_history}, stream_mode="values"):
                     _print_event(event)
+                    last_event = event
                     last = event["messages"][-1]
                     if hasattr(last, "content") and last.content:
                         final_answer = last.content
 
-                # Append the assistant's reply to history so next turn sees it
-                if final_answer:
-                    ai_reply = final_answer
-                    if isinstance(ai_reply, list):
-                        ai_reply = "\n".join(
-                            b.get("text", str(b)) if isinstance(b, dict) else str(b)
-                            for b in ai_reply
-                        )
-                    conversation_history.append(_AIMessage(content=ai_reply))
+                # ── Replace history with the FULL graph output ─────────────────
+                # LangGraph streams the complete cumulative message list on every
+                # step. The final event contains: SystemMsg + HumanMsg + all
+                # intermediate AIMsg(tool_calls=[...]) + ToolMsg + final AIMsg.
+                # Capturing this preserves tool results across REPL turns so the
+                # agent won't re-call the same tools for the same information.
+                if last_event is not None:
+                    conversation_history = list(last_event["messages"])
 
                 # Save the persistent session to SQLite if active
                 if session_manager and session_id:

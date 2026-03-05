@@ -46,9 +46,17 @@ class WorkerAgentConfig:
 
 @dataclass
 class MCPClientConfig:
-    """A direct MCP tool server (not a worker agent) the orchestrator connects to."""
+    """
+    A direct MCP tool server (not a worker agent) the orchestrator connects to.
+
+    transport: "stdio" (default) or "sse"
+    url:       Required when transport="sse" (e.g. "http://127.0.0.1:6010/sse")
+    command/args: Used only for stdio transport.
+    """
     name: str
-    command: str
+    transport: str = "stdio"          # "stdio" | "sse"
+    url: str | None = None            # SSE endpoint URL (transport=sse only)
+    command: str = ""                 # stdio binary (transport=stdio only)
     args: list[str] = field(default_factory=list)
     env: dict = field(default_factory=dict)
 
@@ -114,6 +122,15 @@ class SummarizerConfig:
 
 
 @dataclass
+class NotifyServerConfig:
+    """Optional Agent_notify background notification server."""
+    enabled: bool = False
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -122,6 +139,7 @@ class AppConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     chat_history: ChatHistoryConfig = field(default_factory=ChatHistoryConfig)
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
+    notify_server: NotifyServerConfig = field(default_factory=NotifyServerConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +222,13 @@ def load_config(config_path: str | None = None) -> AppConfig:
     # --- Direct MCP Clients ---
     mcp_clients: list[MCPClientConfig] = []
     for entry in raw.get("mcp_clients", []) or []:
+        transport = entry.get("transport", "stdio")
         mcp_clients.append(
             MCPClientConfig(
                 name=entry["name"],
-                command=entry["command"],
+                transport=transport,
+                url=entry.get("url"),           # only for transport=sse
+                command=entry.get("command", ""),
                 args=entry.get("args", []),
                 env=entry.get("env", {}),
             )
@@ -257,6 +278,15 @@ def load_config(config_path: str | None = None) -> AppConfig:
         connection_string=chat_raw.get("connection_string", "sessions.db")
     )
 
+    # --- Notify Server ---
+    notify_raw = raw.get("notify_server", {})
+    notify_server = NotifyServerConfig(
+        enabled=bool(notify_raw.get("enabled", False)),
+        command=notify_raw.get("command", ""),
+        args=notify_raw.get("args", []),
+        env=notify_raw.get("env", {}),
+    )
+
     return AppConfig(
         agent=agent,
         model=model,
@@ -265,4 +295,5 @@ def load_config(config_path: str | None = None) -> AppConfig:
         memory=memory,
         chat_history=chat_history,
         summarizer=summarizer,
+        notify_server=notify_server,
     )

@@ -90,13 +90,32 @@ SUMMARY:
 <An updated 2-4 sentence narrative combining the previous summary with the new messages.>
 
 NEW GLOBAL FACTS:
-- <Only facts introduced in the recent messages>
-- <Domain rules, technical knowledge, general world knowledge>
-(Write "none" on a single line if there are no new global facts to add.)
+Extract ONLY facts that meet ALL of the following criteria:
+  1. Explicitly stated or directly demonstrated in the recent messages (not inferred)
+  2. Objectively true regardless of this specific session (e.g. library APIs, config formats, domain rules, error fixes)
+  3. Genuinely useful to recall in a completely different future conversation
+
+DO NOT include:
+  - Observations about how the AI agent behaves or responds (e.g. "The system greets users warmly")
+  - Generic workflow descriptions (e.g. "The system checks memory before responding")
+  - Facts that are obvious, trivial, or common knowledge
+  - Anything that is only true within this session's context
+
+Example of a GOOD global fact: "ChromaDB requires metadata values to be str, int, float, or bool — not None."
+Example of a BAD global fact: "The system responds to greetings with friendly acknowledgments."
+
+- <Concrete, durable, externally-true fact from the conversation>
+(Write "none" on a single line if there are no qualifying global facts.)
 
 NEW PRIVATE FACTS:
-- <Only facts introduced in the recent messages>
-- <User names, personal preferences, project paths, specific session context>
+Extract ONLY facts that are specific to this user or session and would be useful to recall later:
+  - User names, stated preferences, or explicit personal context
+  - Project-specific paths, names, or configuration the user mentioned
+  - Goals or constraints the user explicitly described
+
+DO NOT include generic session observations or agent behavior descriptions.
+
+- <User/session-specific fact explicitly stated in the conversation>
 (Write "none" on a single line if there are no new private facts to add.)
 """
 
@@ -254,19 +273,55 @@ NEW PRIVATE FACTS:
 
     @staticmethod
     def _messages_to_text(messages: list) -> str:
+        from langchain_core.messages import ToolMessage
         lines = []
         for m in messages:
-            role = (
-                "Human" if isinstance(m, HumanMessage)
-                else "Assistant" if isinstance(m, AIMessage)
-                else "Tool"
-            )
-            content = m.content
+            if isinstance(m, HumanMessage):
+                role = "Human"
+                content = m.content
+            elif isinstance(m, AIMessage):
+                # AI message may carry tool_calls, text content, or both
+                tool_calls = getattr(m, "tool_calls", None)
+                content = m.content
+                if isinstance(content, list):
+                    content = " ".join(
+                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                        for b in content
+                    )
+                if tool_calls and not content:
+                    # Pure tool-dispatch message — no visible text
+                    calls_repr = ", ".join(
+                        f"{tc.get('name','?')}({tc.get('args',{})})"
+                        for tc in tool_calls
+                    )
+                    role = "Assistant[tool_calls]"
+                    content = calls_repr
+                elif tool_calls:
+                    calls_repr = ", ".join(
+                        f"{tc.get('name','?')}({tc.get('args',{})})"
+                        for tc in tool_calls
+                    )
+                    role = "Assistant"
+                    content = f"{content} [called: {calls_repr}]"
+                else:
+                    role = "Assistant"
+            elif isinstance(m, ToolMessage):
+                tool_name = getattr(m, "name", None) or getattr(m, "tool_call_id", "tool")
+                role = f"Tool[{tool_name}]"
+                content = m.content
+            else:
+                role = "System"
+                content = m.content
+
             if isinstance(content, list):
                 content = " ".join(
                     b.get("text", str(b)) if isinstance(b, dict) else str(b)
                     for b in content
                 )
+            # Truncate very long tool results so the summarizer prompt stays sane
+            content = str(content)
+            if len(content) > 800:
+                content = content[:800] + "…[truncated]"
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
 
