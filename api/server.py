@@ -83,115 +83,137 @@ class AgentSession:
         self.current_summary: str = ""
         self.known_global_facts: list[str] = []
         self.known_private_facts: list[str] = []
-        self._stack = AsyncExitStack()
+        self._stack = None
         self._ready = False
         self._lock = asyncio.Lock()   # serialise concurrent chat calls
+        self._shutdown_event = asyncio.Event()
+        self._boot_complete = asyncio.Event()
+        self._bg_task = None
 
     async def boot(self) -> None:
-        """Connect all tools, build the graph, load history. Called once."""
+        """Starts the background task that manages MCP connections."""
+        if self._bg_task is not None:
+            return
+        self._bg_task = asyncio.create_task(self._run_stack())
+        await self._boot_complete.wait()
+
+    async def _run_stack(self) -> None:
+        """Connect all tools, build the graph, load history. Runs in a dedicated task."""
         from langgraph.prebuilt import create_react_agent, ToolNode
         from core.llm import get_llm
 
-        await self._stack.__aenter__()
-        all_tools = []
+        try:
+            async with AsyncExitStack() as stack:
+                self._stack = stack
+                all_tools = []
 
-        # ── Worker agents ──────────────────────────────────────────────────
-        for wa in self.config.worker_agents:
-            try:
-                tools = await load_mcp_server_tools(
-                    self._stack,
-                    command=wa.command, args=wa.args, env=wa.env or None,
-                    description_override=wa.description,
-                )
-                all_tools.extend(tools)
-                logger.info("[Session %s] Worker '%s' → %s", self.session_id, wa.name, [t.name for t in tools])
-            except Exception as exc:
-                logger.warning("[Session %s] Worker '%s' failed: %s", self.session_id, wa.name, exc)
+                # ── Worker agents ──────────────────────────────────────────────────
+                for wa in self.config.worker_agents:
+                    try:
+                        tools = await load_mcp_server_tools(
+                            self._stack,
+                            command=wa.command, args=wa.args, env=wa.env or None,
+                            description_override=wa.description,
+                        )
+                        all_tools.extend(tools)
+                        logger.info("[Session %s] Worker '%s' → %s", self.session_id, wa.name, [t.name for t in tools])
+                    except Exception as exc:
+                        logger.warning("[Session %s] Worker '%s' failed: %s", self.session_id, wa.name, exc)
 
-        # ── Direct MCP tool servers ────────────────────────────────────────
-        for mc in self.config.mcp_clients:
-            try:
-                tools = await load_mcp_server_tools(
-                    self._stack,
-                    transport=mc.transport, url=mc.url,
-                    command=mc.command, args=mc.args, env=mc.env or None,
-                )
-                all_tools.extend(tools)
-                logger.info("[Session %s] MCP '%s' → %s", self.session_id, mc.name, [t.name for t in tools])
-            except Exception as exc:
-                logger.warning("[Session %s] MCP '%s' failed: %s", self.session_id, mc.name, exc)
+                # ── Direct MCP tool servers ────────────────────────────────────────
+                for mc in self.config.mcp_clients:
+                    try:
+                        tools = await load_mcp_server_tools(
+                            self._stack,
+                            transport=mc.transport, url=mc.url,
+                            command=mc.command, args=mc.args, env=mc.env or None,
+                        )
+                        all_tools.extend(tools)
+                        logger.info("[Session %s] MCP '%s' → %s", self.session_id, mc.name, [t.name for t in tools])
+                    except Exception as exc:
+                        logger.warning("[Session %s] MCP '%s' failed: %s", self.session_id, mc.name, exc)
 
-        # ── Memory tools ───────────────────────────────────────────────────
-        from typing import Literal as _Lit
-        if self.config.memory.enabled:
-            from core.memory import get_backend as _get_backend
-            from pathlib import Path as _Path
-            from langchain_core.tools import tool as lc_tool
+                # ── Memory tools ───────────────────────────────────────────────────
+                if self.config.memory.enabled:
+                    from core.memory import get_backend as _get_backend
+                    from pathlib import Path as _Path
+                    from langchain_core.tools import tool as lc_tool
 
-            _mem_dir = _Path(self.config.memory.memory_dir)
-            if not _mem_dir.is_absolute():
-                _mem_dir = _Path(__file__).parent.parent / self.config.memory.memory_dir
-            try:
-                self.backend = _get_backend(
-                    backend_type=self.config.memory.backend,
-                    memory_dir=_mem_dir,
-                    max_save_length=self.config.memory.max_save_length,
-                    rag_server_cfg=self.config.memory.rag_server,
-                )
+                    _mem_dir = _Path(self.config.memory.memory_dir)
+                    if not _mem_dir.is_absolute():
+                        _mem_dir = _Path(__file__).parent.parent / self.config.memory.memory_dir
+                    try:
+                        self.backend = _get_backend(
+                            backend_type=self.config.memory.backend,
+                            memory_dir=_mem_dir,
+                            max_save_length=self.config.memory.max_save_length,
+                            rag_server_cfg=self.config.memory.rag_server,
+                        )
 
-                _backend = self.backend
-                _sid = self.session_id
+                        _backend = self.backend
+                        _sid = self.session_id
 
-                @lc_tool
-                def memory_search(query: str, category: _Lit["all", "history", "facts"] = "all") -> str:
-                    """Search long-term memory for past tasks and results."""
-                    return _backend.search(query, category=category, session_id=_sid)
+                        @lc_tool
+                        def memory_search(query: str, category: Literal["all", "history", "facts"] = "all") -> str:
+                            """Search long-term memory for past tasks and results."""
+                            return _backend.search(query, category=category, session_id=_sid)
 
-                @lc_tool
-                def memory_save(fact: str) -> str:
-                    """Save an important fact to long-term memory for future sessions."""
-                    return _backend.save_fact(fact)
+                        @lc_tool
+                        def memory_save(fact: str) -> str:
+                            """Save an important fact to long-term memory for future sessions."""
+                            return _backend.save_fact(fact)
 
-                all_tools.extend([memory_search, memory_save])
-            except Exception as exc:
-                logger.warning("[Session %s] Memory failed: %s", self.session_id, exc)
+                        all_tools.extend([memory_search, memory_save])
+                    except Exception as exc:
+                        logger.warning("[Session %s] Memory failed: %s", self.session_id, exc)
 
-        # ── Build graph ────────────────────────────────────────────────────
-        llm = get_llm(self.config.model)
-        tool_node = ToolNode(all_tools, handle_tool_errors=True)
-        self.graph = create_react_agent(model=llm, tools=tool_node)
+                # ── Build graph ────────────────────────────────────────────────────
+                llm = get_llm(self.config.model)
+                tool_node = ToolNode(all_tools, handle_tool_errors=True)
+                self.graph = create_react_agent(model=llm, tools=tool_node)
 
-        # ── Summarizer ─────────────────────────────────────────────────────
-        from core.conversation_summarizer import ConversationSummarizer
-        if self.config.summarizer.enabled:
-            self.summarizer = ConversationSummarizer(self.config.summarizer, self.config.model)
+                # ── Summarizer ─────────────────────────────────────────────────────
+                from core.conversation_summarizer import ConversationSummarizer
+                if self.config.summarizer.enabled:
+                    self.summarizer = ConversationSummarizer(self.config.summarizer, self.config.model)
 
-        # ── Load persisted conversation history ────────────────────────────
-        if self.session_id:
-            cfg = self.config.chat_history
-            if cfg.backend == "sqlite":
-                from core.history_sqlite import SqliteConversationHistory
-                from pathlib import Path
-                _db = Path(cfg.connection_string)
-                if not _db.is_absolute():
-                    _mem_dir2 = Path(self.config.memory.memory_dir)
-                    if not _mem_dir2.is_absolute():
-                        _mem_dir2 = Path(__file__).parent.parent / self.config.memory.memory_dir
-                    _db = _mem_dir2 / cfg.connection_string
-                self.session_manager = SqliteConversationHistory(db_path=_db)
-                history = self.session_manager.load_session(self.session_id)
-                if history:
-                    self.conversation_history = history
-                    logger.info("[Session %s] Resumed: %d messages", self.session_id, len(history))
+                # ── Load persisted conversation history ────────────────────────────
+                if self.session_id:
+                    cfg = self.config.chat_history
+                    if cfg.backend == "sqlite":
+                        from core.history_sqlite import SqliteConversationHistory
+                        from pathlib import Path
+                        _db = Path(cfg.connection_string)
+                        if not _db.is_absolute():
+                            _mem_dir2 = Path(self.config.memory.memory_dir)
+                            if not _mem_dir2.is_absolute():
+                                _mem_dir2 = Path(__file__).parent.parent / self.config.memory.memory_dir
+                            _db = _mem_dir2 / cfg.connection_string
+                        self.session_manager = SqliteConversationHistory(db_path=_db)
+                        history = self.session_manager.load_session(self.session_id)
+                        if history:
+                            self.conversation_history = history
+                            logger.info("[Session %s] Resumed: %d messages", self.session_id, len(history))
 
-        if not self.conversation_history:
-            self.conversation_history = [SystemMessage(content=self.config.agent.system_prompt)]
+                if not self.conversation_history:
+                    self.conversation_history = [SystemMessage(content=self.config.agent.system_prompt)]
 
-        self._ready = True
+                self._ready = True
+                self._boot_complete.set()
+                await self._shutdown_event.wait()
+                
+        except Exception as exc:
+            logger.exception("[Session %s] Background task crashed", self.session_id)
+        finally:
+            self._ready = False
+            self._boot_complete.set()
 
     async def shutdown(self) -> None:
         """Tear down MCP connections."""
-        await self._stack.__aexit__(None, None, None)
+        self._shutdown_event.set()
+        if self._bg_task:
+            await self._bg_task
+            self._bg_task = None
         self._ready = False
 
     async def chat(self, user_message: str) -> AsyncGenerator[str, None]:

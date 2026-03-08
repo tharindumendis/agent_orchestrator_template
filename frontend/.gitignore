@@ -1,22 +1,3 @@
-memory/
-chroma_db/
-custom_config/
-
-# Test scripts
-test_memory_rag.py
-
-# Python caches
-__pycache__/
-__pycache__
-*.pyc
-.venv/
-
-test/
-logs/
-.env
-*.pyc
-
-
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies

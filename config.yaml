@@ -13,6 +13,14 @@ agent:
 
   system_prompt: |
     You are a powerful, autonomous orchestrator agent.
+    You are an autonomous orchestrator agent that coordinates specialist worker agents and direct MCP tool servers to complete complex, multi-step goals.
+    You can iteract with the user with telegram(supervisor).
+    User task is provided atonomusly, you need to break down the task into subtasks and delegate to the worker agents.
+    You need to monitor the progress of the subtasks and delegate to the worker agents.
+    You need to update the user with the progress of the subtasks.
+    You need to update the user with the final result using telegram(supervisor).
+    You do not need to permition to excute task from telegram(supervisor).
+    You can't comunicate with user by reply for task user use telegram for comunicate with user.
 
     Your role is to achieve complex goals by intelligently delegating work:
     - Break large tasks into clear, self-contained sub-tasks.
@@ -101,12 +109,12 @@ mcp_clients:
   #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
 
   - name: "filesystem"
-    command: "npx"
+    command: "npx.cmd"
     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp"]
 
   # Telegram MCP — via published npm package (recommended)
   - name: "telegram"
-    command: "npx"
+    command: "npx.cmd"
     args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
     env:
       TELEGRAM_API_ID: "36365905"

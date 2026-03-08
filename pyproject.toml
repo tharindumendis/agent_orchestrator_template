@@ -35,10 +35,14 @@ dependencies = [
     # Config / utilities
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
+    # API server (optional but included by default)
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
 ]
 
 [project.scripts]
 agent-head = "main:_cli_entry"
+agent-api  = "api.server:main"
 
 [project.optional-dependencies]
 dev = [
