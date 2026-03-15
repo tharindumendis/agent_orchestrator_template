@@ -25,7 +25,7 @@ uv venv .venv
 
 # 2. Activate + install
 .venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux/macOS
+source .venv/bin/activate     # Linux/macOS
 uv pip install -e .
 
 # 3. Run interactive REPL

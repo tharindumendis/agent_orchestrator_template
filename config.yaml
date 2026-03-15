@@ -112,6 +112,10 @@ mcp_clients:
     command: "npx.cmd"
     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp"]
 
+  # - name: "figma"
+  #   transport: "http"
+  #   url: "https://mcp.figma.com/mcp"
+
   # Telegram MCP — via published npm package (recommended)
   - name: "telegram"
     command: "npx.cmd"
@@ -159,7 +163,7 @@ memory:
   rag_server:
     command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
     args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
-    collection: "agent_memory"
+    collection: "admin_docs"
     env:
       RAG_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\rag_config.yaml"
 
