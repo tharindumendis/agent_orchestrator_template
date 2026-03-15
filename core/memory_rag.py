@@ -183,9 +183,11 @@ class RagMemoryBackend(MemoryBackend):
         metadata_filter = {"session_id": session_id} if session_id else None
 
         combined = []
+        print(f"[DEBUG RAG] Starting search with query='{query}', top_k={top_k}, category='{category}', session_id='{session_id}'")
         
         # Helper to search and append
         def _search_append(col: str, title: str, k: int, m_filter: dict | None = None):
+            print(f"[DEBUG RAG] Searching '{col}' with query '{query}' and metadata_filter={m_filter}")
             if not col: return
             args = {"query": query, "collection": col, "top_k": k}
             if m_filter:
@@ -204,12 +206,24 @@ class RagMemoryBackend(MemoryBackend):
                 _search_append(self._col_facts, "PRIVATE FACTS", top_k, m_filter=m_filter_priv)
         elif category == "history":
             _search_append(history_col, "HISTORY RESULTS", top_k, m_filter=metadata_filter)
-        else:
-            # Combine all if category is "all"
+
+        elif category == "all":
+            print(f"[DEBUG RAG] Searching HISTORY and GLOBAL FACTS with category 'all' and query '{query}' and metadata_filter={metadata_filter}")
             k_half = max(1, top_k//2)
             _search_append(history_col, "HISTORY RESULTS", k_half, m_filter=metadata_filter)
             _search_append(self._col_facts, "GLOBAL FACTS", k_half, m_filter={"is_global": "true"})
             if metadata_filter:
+                print(f"[DEBUG RAG] Searching PRIVATE FACTS with category 'all' and query '{query}' and metadata_filter={metadata_filter}")
+                m_filter_priv = {"$and": [{"is_global": "false"}, metadata_filter]}
+                _search_append(self._col_facts, "PRIVATE FACTS", top_k, m_filter=m_filter_priv)
+        else:
+            # Combine all if category is "all"
+            print(f"[DEBUG RAG] Searching all collections with query '{query}' and metadata_filter={metadata_filter}")
+            k_half = max(1, top_k//2)
+            _search_append(history_col, "HISTORY RESULTS", k_half, m_filter=metadata_filter)
+            _search_append(self._col_facts, "GLOBAL FACTS", k_half, m_filter={"is_global": "true"})
+            if metadata_filter:
+                print(f"[DEBUG RAG] Searching PRIVATE FACTS with query '{query}' and metadata_filter={metadata_filter}")
                 m_filter_priv = {"$and": [{"is_global": "false"}, metadata_filter]}
                 _search_append(self._col_facts, "PRIVATE FACTS", k_half, m_filter=m_filter_priv)
             

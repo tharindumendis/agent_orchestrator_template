@@ -6,15 +6,93 @@ Loads and validates config.yaml into typed dataclasses for the Orchestrator Agen
 Config schema adds two new sections on top of the worker template:
   worker_agents  — MCP stdio subprocesses that expose `execute_task` (Agent_a style)
   mcp_clients    — Direct MCP tool servers (filesystem, search, shell, etc.)
+
+Config resolution priority
+---------------------------
+1. Explicit ``config_path`` argument
+2. ``ORCHESTRATOR_CONFIG`` environment variable
+3. OS user-config dir  (created from bundled default on first run)
+       Windows : %LOCALAPPDATA%\\agent_head\\config.yaml
+       macOS   : ~/Library/Application Support/agent_head/config.yaml
+       Linux   : $XDG_CONFIG_HOME/agent_head/config.yaml  (~/.config/…)
+4. <cwd>/config.yaml
+5. Bundled package default  (Agent_head/config.yaml next to main.py)
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
+
+# Bundled default sits next to main.py (package root)
+_PACKAGE_DEFAULT_CONFIG = Path(__file__).parent.parent / "config.yaml"
+
+
+# ---------------------------------------------------------------------------
+# OS-specific paths
+# ---------------------------------------------------------------------------
+
+
+def get_app_config_dir() -> Path:
+    """
+    Returns the OS-specific user-editable config directory for agent_head.
+
+    - Windows : %LOCALAPPDATA%\\agent_head
+    - macOS   : ~/Library/Application Support/agent_head
+    - Linux   : $XDG_CONFIG_HOME/agent_head  (default ~/.config/agent_head)
+    """
+    if os.name == "nt":  # Windows
+        base = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":  # macOS
+        base = Path.home() / "Library" / "Application Support"
+    else:  # Linux / other POSIX
+        base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+    config_dir = base / "agent_head"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def bootstrap_config() -> Path:
+    """
+    Ensures a user-editable config.yaml exists in the OS config directory.
+
+    - If it already exists  → does nothing, returns the existing path.
+    - If it doesn't exist   → copies the bundled default there and logs a
+                               message so the user knows where to find it.
+
+    Returns the path to the user config file (whether new or pre-existing).
+    """
+    user_config = get_app_config_dir() / "config.yaml"
+
+    if user_config.exists():
+        return user_config
+
+    # First run — copy the bundled default
+    if _PACKAGE_DEFAULT_CONFIG.exists():
+        shutil.copy2(_PACKAGE_DEFAULT_CONFIG, user_config)
+        logger.info(
+            "[agent_head] First-run bootstrap: config copied to %s\n"
+            "             Edit that file to customise your orchestrator settings.",
+            user_config,
+        )
+    else:
+        logger.warning(
+            "[agent_head] Bundled default config not found at %s; "
+            "skipping bootstrap. User config path: %s",
+            _PACKAGE_DEFAULT_CONFIG,
+            user_config,
+        )
+
+    return user_config
 
 
 # ---------------------------------------------------------------------------
@@ -149,20 +227,28 @@ class AppConfig:
 
 def load_config(config_path: str | None = None) -> AppConfig:
     """
-    Load orchestrator config. Priority:
-    1. config_path argument
-    2. ORCHESTRATOR_CONFIG env var
-    3. ./config.yaml (cwd)
-    4. <package_root>/config.yaml
+    Load orchestrator config.  Resolution priority:
+
+    1. ``config_path``           — explicit path passed by the caller
+    2. ``ORCHESTRATOR_CONFIG``   — environment variable
+    3. OS user-config            — bootstrapped on first run from the bundled default
+       ``%LOCALAPPDATA%\\agent_head\\config.yaml``  (Windows)
+       ``~/Library/Application Support/agent_head/config.yaml``  (macOS)
+       ``~/.config/agent_head/config.yaml``  (Linux)
+    4. ``<cwd>/config.yaml``     — dev / monorepo convenience
+    5. ``<package_root>/config.yaml``  — bundled package fallback
     """
     env_path = os.getenv("ORCHESTRATOR_CONFIG")
+    user_config_path = bootstrap_config()
     cwd_path = Path.cwd() / "config.yaml"
-    package_root_path = Path(__file__).parent.parent / "config.yaml"
+    package_root_path = _PACKAGE_DEFAULT_CONFIG
 
     if config_path:
         final_path = Path(config_path)
     elif env_path:
         final_path = Path(env_path)
+    elif user_config_path.exists():
+        final_path = user_config_path
     elif cwd_path.exists():
         final_path = cwd_path
     else:
@@ -171,13 +257,15 @@ def load_config(config_path: str | None = None) -> AppConfig:
     if not final_path.exists():
         raise FileNotFoundError(
             f"Orchestrator config not found. Checked:\n"
-            f"  - Explicit path: {config_path}\n"
-            f"  - Env var (ORCHESTRATOR_CONFIG): {env_path}\n"
-            f"  - CWD: {cwd_path}\n"
-            f"  - Package root: {package_root_path}\n"
-            f"Please ensure a 'config.yaml' exists."
+            f"  1. Explicit path              : {config_path}\n"
+            f"  2. Env var ORCHESTRATOR_CONFIG: {env_path}\n"
+            f"  3. OS user-config             : {user_config_path}\n"
+            f"  4. CWD                        : {cwd_path}\n"
+            f"  5. Package default            : {package_root_path}\n"
+            f"Please ensure a 'config.yaml' exists at one of the above locations."
         )
 
+    logger.info("[agent_head] Using config: %s", final_path.resolve())
     print(f"[*] Using config: {final_path.absolute()}")
     with open(final_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
