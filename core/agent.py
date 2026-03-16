@@ -42,7 +42,7 @@ except ImportError:
     pass
 
 from core.mcp_loader import load_mcp_server_tools
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import create_react_agent, ToolNode
 
 from core.config_loader import AppConfig
 from core.job_logger import JobLogger
@@ -296,12 +296,14 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
                 )
                 return
 
+            # Wrap tools in a ToolNode with error handling so that any ToolException
+            # (e.g. permission errors, API failures) is caught and returned to the
+            # agent as a ToolMessage instead of crashing the graph stream.
+            tool_node = ToolNode(all_tools, handle_tool_errors=True)
+
             graph = create_react_agent(
                 model=llm,
-                tools=all_tools,
-                # Return tool errors as ToolMessages so the LLM can recover,
-                # instead of raising and crashing the whole orchestration.
-                handle_tool_errors=True,
+                tools=tool_node,
             )
 
             jl.log_step(
