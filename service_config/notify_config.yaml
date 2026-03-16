@@ -34,7 +34,7 @@ servers:
       # Detect new messages in a specific group/channel (optional)
       - tool: messagesList
         args:
-          channelId: "1173401646"
+          channelId: "your_channel_id_here"
           limit: 5
 
   # ── GitHub (optional) ─────────────────────────────────────────
