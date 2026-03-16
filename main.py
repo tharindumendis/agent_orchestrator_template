@@ -488,211 +488,235 @@ async def interactive_loop(
             await asyncio.sleep(1.5)
 
         # ── REPL loop ─────────────────────────────────────────────────────────
-        while True:
-            # ── Drain notification queue before prompting ──────────────────
-            while not notification_queue.empty():
-                notif = notification_queue.get_nowait()
-                change = notif.get("change", {})
-                server = notif.get("server", "?")
-                tool   = notif.get("tool", "?")
-                added  = change.get("added", [])
-                label  = f"{server}/{tool}"
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.patch_stdout import patch_stdout
 
-                print(f"\n{_c(YELLOW, f'[🔔 Notification] {label} — {len(added)} new item(s)')}")
+        session = PromptSession()
+        prompt_task = asyncio.create_task(session.prompt_async(f"\n>> Task: "))
+        notif_task = asyncio.create_task(notification_queue.get())
+        pending_tasks: set[asyncio.Task] = {prompt_task, notif_task}
 
-                if added:
-                    import json as _j
-                    auto_task = (
-                        f"[Auto-Task from {label}]\n"
-                        f"New items detected via notification:\n"
-                        f"{_j.dumps(added, indent=2)}\n\n"
-                        f"Analyse and act on these new items appropriately."
-                    )
-                    conversation_history.append(HumanMessage(content=auto_task))
-                    print(f"{_c(BOLD, '[Auto-Task]')} {auto_task[:120]}...\n" + "─" * 60)
-                    final_answer = ""
-                    async for event in graph.astream(
-                        {"messages": conversation_history}, stream_mode="values"
-                    ):
-                        _print_event(event)
-                        last = event["messages"][-1]
-                        if hasattr(last, "content") and last.content:
-                            final_answer = last.content
-                    if last_event is not None:
-                        conversation_history = list(event["messages"])
-                    print(f"\n{_c(BOLD, '[Auto-Answer]')}\n{final_answer}\n" + "─" * 60)
+        try:
+            while True:
+                done, pending_tasks = await asyncio.wait(
+                    pending_tasks, return_when=asyncio.FIRST_COMPLETED
+                )
 
-            # try:
-            #     # Use asyncio.to_thread so the event loop stays free while
-            #     # waiting for input — this lets the notification background
-            #     # task run concurrently instead of being starved.
-            #     task = (await asyncio.to_thread(
-            #         input, f"\n{_c(BOLD, '>> Task:')} "
-            #     )).strip()
-
-            from prompt_toolkit import PromptSession
-            from prompt_toolkit.patch_stdout import patch_stdout
-
-            # Create a session BEFORE your while loop
-            session = PromptSession()
-
-            # ... inside your while True loop ...
-            try:
-                # patch_stdout ensures background prints don't garble the input line!
-                with patch_stdout():
-                    # native async prompt, no need for asyncio.to_thread
-                    task = (await session.prompt_async(f"\n>> Task: ")).strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n\nExiting.")
-                break
-
-            if not task:
-                continue
-            if task.lower() in {"quit", "exit", "q"}:
-                print("Exiting.")
-                break
-
-            try:
-                # --- Auto-Inject RAG Context ---
-                if config.memory.enabled and config.memory.auto_feed_top_k > 0:
+                # ── Notification arrived
+                if notif_task in done:
+                    pending_tasks.discard(notif_task)
                     try:
-                        # Grab the backend initialized earlier in PHASE 2.5
-                        context_str = backend.search(
-                            task, 
-                            category=config.memory.auto_feed_category,
-                            session_id=session_id
+                        notif = notif_task.result()
+                    except asyncio.CancelledError:
+                        break
+
+                    change = notif.get("change", {})
+                    server = notif.get("server", "?")
+                    tool = notif.get("tool", "?")
+                    added = change.get("added", [])
+                    label = f"{server}/{tool}"
+
+                    print(f"\n{_c(YELLOW, f'[🔔 Notification] {label} — {len(added)} new item(s)')}")
+
+                    if added:
+                        import json as _j
+                        auto_task = (
+                            f"[Auto-Task from {label}]\n"
+                            f"New items detected via notification:\n"
+                            f"{_j.dumps(added, indent=2)}\n\n"
+                            f"Analyse and act on these new items appropriately."
                         )
-                        
-                        # We do a basic split/truncate to avoid huge windows.
-                        # For RAG, each backend might format differently, but a raw character limit is safe.
-                        MAX_CONTEXT_CHARS = 4000
-                        if len(context_str) > MAX_CONTEXT_CHARS:
-                            context_str = context_str[:MAX_CONTEXT_CHARS] + "\n...[truncated]"
-                            
-                        if context_str.strip() and "No relevant" not in context_str:
-                            print(f"  {_c(GREY, '[~]')} Auto-injected {len(context_str)} chars of memory context.")
-                            task = f"[System: Relevant Past Memory]\n{context_str}\n\n[User Task]\n{task}"
-                    except Exception as e:
-                        logger.warning(f"Failed to auto-fetch RAG context: {e}")
+                        conversation_history.append(HumanMessage(content=auto_task))
+                        print(f"{_c(BOLD, '[Auto-Task]')} {auto_task[:120]}...\n" + "─" * 60)
+                        final_answer = ""
+                        async for event in graph.astream(
+                            {"messages": conversation_history}, stream_mode="values"
+                        ):
+                            _print_event(event)
+                            last = event["messages"][-1]
+                            if hasattr(last, "content") and last.content:
+                                final_answer = last.content
+                        if last_event is not None:
+                            conversation_history = list(event["messages"])
+                        print(f"\n{_c(BOLD, '[Auto-Answer]')}\n{final_answer}\n" + "─" * 60)
 
-                # Append the (potentially enriched) new user message to running history
-                conversation_history.append(HumanMessage(content=task))
+                    notif_task = asyncio.create_task(notification_queue.get())
+                    pending_tasks.add(notif_task)
 
-                print(f"\n{_c(BOLD, '[Task]')} {task}\n" + "─" * 60)
-                final_answer = ""
-
-                # --- Write exact LLM prompt to debug log ---
-                if debug_log_path:
+                # ── User input arrived
+                if prompt_task in done:
+                    pending_tasks.discard(prompt_task)
                     try:
-                        import json
-                        from langchain_core.messages import messages_to_dict
-                        with open(debug_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"\n--- [TURN] PROMPT FED TO LLM ---\n")
-                            f.write(json.dumps(messages_to_dict(conversation_history), indent=2))
-                            f.write("\n\n")
-                    except Exception as e:
-                        logger.error(f"Failed to write to debug log: {e}")
+                        task = prompt_task.result().strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print("\n\nExiting.")
+                        break
 
-                # ── Debug Logger For Prompts  ──────────────────────────────────────────
-                # debug_log_path = None
-                # if config.agent.debug:
-                #     from pathlib import Path
-                #     from datetime import datetime
-                #     log_prompt_dir = Path("logs/prompts")
-                #     log_prompt_dir.mkdir(parents=True, exist_ok=True)
-                #     # Use session_id if resumed, else generate a fresh timestamp
-                #     sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
-                #     debug_log_prompt_path = log_prompt_dir / f"{sess_name}.log"
-                #     with open(debug_log_prompt_path, "a", encoding="utf-8") as f:
-                #         f.write(f"=== full prompt: {conversation_history} ===\n\n")
-                # ── Debug Logger For Prompts ───────────────────────────────────────────
+                    if not task:
+                        prompt_task = asyncio.create_task(session.prompt_async(f"\n>> Task: "))
+                        pending_tasks.add(prompt_task)
+                        continue
+                    if task.lower() in {"quit", "exit", "q"}:
+                        print("Exiting.")
+                        break
+
+                    try:
+                        # --- Auto-Inject RAG Context ---
+                        if config.memory.enabled and config.memory.auto_feed_top_k > 0:
+                            try:
+                                # Grab the backend initialized earlier in PHASE 2.5
+                                context_str = backend.search(
+                                    task, 
+                                    category=config.memory.auto_feed_category,
+                                    session_id=session_id
+                                )
+                                
+                                # We do a basic split/truncate to avoid huge windows.
+                                # For RAG, each backend might format differently, but a raw character limit is safe.
+                                MAX_CONTEXT_CHARS = 4000
+                                if len(context_str) > MAX_CONTEXT_CHARS:
+                                    context_str = context_str[:MAX_CONTEXT_CHARS] + "\n...[truncated]"
+                                    
+                                if context_str.strip() and "No relevant" not in context_str:
+                                    print(f"  {_c(GREY, '[~]')} Auto-injected {len(context_str)} chars of memory context.")
+                                    task = f"[System: Relevant Past Memory]\n{context_str}\n\n[User Task]\n{task}"
+                            except Exception as e:
+                                logger.warning(f"Failed to auto-fetch RAG context: {e}")
+
+                        # Append the (potentially enriched) new user message to running history
+                        conversation_history.append(HumanMessage(content=task))
+
+                        print(f"\n{_c(BOLD, '[Task]')} {task}\n" + "─" * 60)
+                        final_answer = ""
+
+                        # --- Write exact LLM prompt to debug log ---
+                        if debug_log_path:
+                            try:
+                                import json
+                                from langchain_core.messages import messages_to_dict
+                                with open(debug_log_path, "a", encoding="utf-8") as f:
+                                    f.write(f"\n--- [TURN] PROMPT FED TO LLM ---\n")
+                                    f.write(json.dumps(messages_to_dict(conversation_history), indent=2))
+                                    f.write("\n\n")
+                            except Exception as e:
+                                logger.error(f"Failed to write to debug log: {e}")
+
+                        # ── Debug Logger For Prompts  ──────────────────────────────────────────
+                        # debug_log_path = None
+                        # if config.agent.debug:
+                        #     from pathlib import Path
+                        #     from datetime import datetime
+                        #     log_prompt_dir = Path("logs/prompts")
+                        #     log_prompt_dir.mkdir(parents=True, exist_ok=True)
+                        #     # Use session_id if resumed, else generate a fresh timestamp
+                        #     sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+                        #     debug_log_prompt_path = log_prompt_dir / f"{sess_name}.log"
+                        #     with open(debug_log_prompt_path, "a", encoding="utf-8") as f:
+                        #         f.write(f"=== full prompt: {conversation_history} ===\n\n")
+                        # ── Debug Logger For Prompts ───────────────────────────────────────────
 
 
-                last_event: dict | None = None
-                async for event in graph.astream({"messages": conversation_history}, stream_mode="values"):
-                    _print_event(event)
-                    last_event = event
-                    last = event["messages"][-1]
-                    if hasattr(last, "content") and last.content:
-                        final_answer = last.content
+                        last_event: dict | None = None
+                        async for event in graph.astream({"messages": conversation_history}, stream_mode="values"):
+                            _print_event(event)
+                            last_event = event
+                            last = event["messages"][-1]
+                            if hasattr(last, "content") and last.content:
+                                final_answer = last.content
 
-                # ── Replace history with the FULL graph output ─────────────────
-                # LangGraph streams the complete cumulative message list on every
-                # step. The final event contains: SystemMsg + HumanMsg + all
-                # intermediate AIMsg(tool_calls=[...]) + ToolMsg + final AIMsg.
-                # Capturing this preserves tool results across REPL turns so the
-                # agent won't re-call the same tools for the same information.
-                if last_event is not None:
-                    conversation_history = list(last_event["messages"])
+                        # ── Replace history with the FULL graph output ─────────────────
+                        # LangGraph streams the complete cumulative message list on every
+                        # step. The final event contains: SystemMsg + HumanMsg + all
+                        # intermediate AIMsg(tool_calls=[...]) + ToolMsg + final AIMsg.
+                        # Capturing this preserves tool results across REPL turns so the
+                        # agent won't re-call the same tools for the same information.
+                        if last_event is not None:
+                            conversation_history = list(last_event["messages"])
 
-                # Save the persistent session to SQLite if active
-                if session_manager and session_id:
-                    session_manager.save_session(session_id, conversation_history)
+                        # Save the persistent session to SQLite if active
+                        if session_manager and session_id:
+                            session_manager.save_session(session_id, conversation_history)
 
-                # ── Rolling summarization ─────────────────────────────────────
-                if summarizer and summarizer.should_summarize(conversation_history):
-                    orig_len = len(conversation_history)
-                    result = await summarizer.summarize(
-                        history=conversation_history,
-                        prev_summary=current_summary,
-                        known_global_facts=known_global_facts,
-                        known_private_facts=known_private_facts,
-                    )
-                    conversation_history = result.trimmed_history
-                    current_summary = result.summary         # replace with updated narrative
-                    known_global_facts = result.global_facts # replace entirely (handles corrections)
-                    known_private_facts = result.private_facts
-
-                    # Update the persistent session to SQLite with the newly trimmed history
-                    if session_manager and session_id:
-                        session_manager.save_session(session_id, conversation_history)
-
-                    if config.summarizer.save_to_memory and backend is not None:
-                        # Reuse the SAME backend instance (and therefore the same RAG
-                        # server subprocess) that handles auto-inject search above.
-                        # Creating a second backend here would spawn a second RAG server
-                        # process writing to the same ChromaDB files simultaneously —
-                        # that causes ChromaDB HNSW 'Error finding id' race conditions.
-                        try:
-                            # Save the session narrative into the isolated history namespace
-                            backend.save(
-                                job_id=f"summary_{int(time.time())}",
-                                task="Rolling Session Summary",
-                                summary=result.summary,
-                                session_id=session_id
+                        # ── Rolling summarization ─────────────────────────────────────
+                        if summarizer and summarizer.should_summarize(conversation_history):
+                            orig_len = len(conversation_history)
+                            result = await summarizer.summarize(
+                                history=conversation_history,
+                                prev_summary=current_summary,
+                                known_global_facts=known_global_facts,
+                                known_private_facts=known_private_facts,
                             )
-                            # Save factual learnings into the global facts namespace
-                            for fact in result.new_global_facts:
-                                backend.save_fact(fact, is_global=True)
+                            conversation_history = result.trimmed_history
+                            current_summary = result.summary         # replace with updated narrative
+                            known_global_facts = result.global_facts # replace entirely (handles corrections)
+                            known_private_facts = result.private_facts
 
-                            # Save private factual learnings
-                            for fact in result.new_private_facts:
-                                backend.save_fact(fact, is_global=False, session_id=session_id)
-                        except Exception as _mem_exc:
-                            logger.warning("[Summarizer] Could not persist to memory: %s", _mem_exc)
+                            # Update the persistent session to SQLite with the newly trimmed history
+                            if session_manager and session_id:
+                                session_manager.save_session(session_id, conversation_history)
 
-                    compressed = orig_len - len(conversation_history)
-                    new_facts_count = len(result.new_global_facts) + len(result.new_private_facts)
-                    total_facts_known = len(known_global_facts) + len(known_private_facts)
-                    print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
-                                   f"{new_facts_count} new/changed facts saved. "
-                                   f"Total facts known: {total_facts_known}."))
+                            if config.summarizer.save_to_memory and backend is not None:
+                                # Reuse the SAME backend instance (and therefore the same RAG
+                                # server subprocess) that handles auto-inject search above.
+                                # Creating a second backend here would spawn a second RAG server
+                                # process writing to the same ChromaDB files simultaneously —
+                                # that causes ChromaDB HNSW 'Error finding id' race conditions.
+                                try:
+                                    # Save the session narrative into the isolated history namespace
+                                    backend.save(
+                                        job_id=f"summary_{int(time.time())}",
+                                        task="Rolling Session Summary",
+                                        summary=result.summary,
+                                        session_id=session_id
+                                    )
+                                    # Save factual learnings into the global facts namespace
+                                    for fact in result.new_global_facts:
+                                        backend.save_fact(fact, is_global=True)
 
-                print("\n" + "─" * 60)
-                if isinstance(final_answer, list):
-                    final_answer = "\n".join(
-                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
-                        for b in final_answer
-                    )
-                print(f"\n{_c(BOLD, '[Final Answer]')}\n{final_answer}")
-                print("─" * 60)
+                                    # Save private factual learnings
+                                    for fact in result.new_private_facts:
+                                        backend.save_fact(fact, is_global=False, session_id=session_id)
+                                except Exception as _mem_exc:
+                                    logger.warning("[Summarizer] Could not persist to memory: %s", _mem_exc)
 
-            except Exception as exc:
-                print(f"\n{_c(RED, '[ERROR]')} {exc}")
-                logger.exception("interactive_loop task failed")
-                # Remove the failed user message so history stays consistent
-                if conversation_history and isinstance(conversation_history[-1], HumanMessage):
-                    conversation_history.pop()
+                            compressed = orig_len - len(conversation_history)
+                            new_facts_count = len(result.new_global_facts) + len(result.new_private_facts)
+                            total_facts_known = len(known_global_facts) + len(known_private_facts)
+                            print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
+                                           f"{new_facts_count} new/changed facts saved. "
+                                           f"Total facts known: {total_facts_known}."))
+
+                        print("\n" + "─" * 60)
+                        if isinstance(final_answer, list):
+                            final_answer = "\n".join(
+                                b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                                for b in final_answer
+                            )
+                        print(f"\n{_c(BOLD, '[Final Answer]')}\n{final_answer}")
+                        print("─" * 60)
+
+                    except Exception as exc:
+                        print(f"\n{_c(RED, '[ERROR]')} {exc}")
+                        logger.exception("interactive_loop task failed")
+                        # Remove the failed user message so history stays consistent
+                        if conversation_history and isinstance(conversation_history[-1], HumanMessage):
+                            conversation_history.pop()
+
+                    prompt_task = asyncio.create_task(session.prompt_async(f"\n>> Task: "))
+                    pending_tasks.add(prompt_task)
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n\nExiting.")
+        finally:
+            # Clean up background tasks so the loop can terminate cleanly.
+            for t in list(pending_tasks):
+                t.cancel()
+            if _notify_task:
+                _notify_task.cancel()
+
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            if _notify_task:
+                await asyncio.gather(_notify_task, return_exceptions=True)
 
     finally:
         await _stack.__aexit__(None, None, None)

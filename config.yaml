@@ -56,30 +56,32 @@ worker_agents:
         worker-agent,
       ]
     env:
-      WORKER_AGENT_CONFIG: "./custom_config/agent_github_config.yaml"
+      WORKER_AGENT_CONFIG: "./service_config/agent_github_config.yaml"
+
   # - name: "CommunicationAgent"
   #   description: "Communication specialist worker agent."
-  #   command: "uv"
+  #   command: "uvx"
   #   args:
-  #     [
-  #       "run",
-  #       "--directory",
-  #       "D:\\DEV\\mcp\\universai\\orchestra\\Agent_a",
-  #       "main.py",
-  #     ]
+  #     ["worker-agent"]
   #   env:
-  #     WORKER_AGENT_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\agent_communication_config.yaml"
+  #     WORKER_AGENT_CONFIG: "./service_config/agent_communication_config.yaml"
 
   # Add more workers below by cloning Agent_a and pointing here:
+
   # - name: "code_worker"
   #   description: "Specialist worker for code generation and file editing."
-  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_code\\.venv\\Scripts\\python.exe"
-  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_code\\main.py"]
+  #   command: "uvx"
+  #   args: ["worker-agent"]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "./service_config/agent_code_config.yaml"
 
   # - name: "research_worker"
-  #   description: "Specialist worker for web research and summarisation."
-  #   command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_research\\.venv\\Scripts\\python.exe"
-  #   args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_research\\main.py"]
+  #   description: "Specialist worker for web research and summarization."
+  #   command: "uvx"
+  #   args: ["worker-agent"]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "./service_config/agent_research_config.yaml"
+
 
 # =============================================================================
 # Notification Server (optional)
@@ -90,10 +92,10 @@ worker_agents:
 # =============================================================================
 notify_server:
   enabled: true
-  command: "python"
-  args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_notify\\server.py"]
+  command: "uvx"
+  args: ["agent-notification-mcp"]
   env:
-    AGENT_NOTIFY_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_notify\\notify_config.yaml"
+    AGENT_NOTIFY_CONFIG: "./service_config/notify_config.yaml"
 
 # =============================================================================
 # Direct MCP Tool Servers
@@ -107,7 +109,7 @@ mcp_clients:
 
   - name: "filesystem"
     command: "npx.cmd"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "../../"]
 
   # - name: "figma"
   #   transport: "http"
@@ -149,11 +151,11 @@ memory:
 
   # Configure this if backend is set to "rag"
   rag_server:
-    command: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\.venv\\Scripts\\python.exe"
-    args: ["D:\\DEV\\mcp\\universai\\orchestra\\Agent_rag\\server.py"]
-    collection: "admin_docs"
+    command: "uvx"
+    args: ["agent-rag-mcp"]
+    collection: "docs"
     env:
-      RAG_CONFIG: "D:\\DEV\\mcp\\universai\\orchestra\\Agent_head\\custom_config\\rag_config.yaml"
+      RAG_CONFIG: "./service_config/rag_config.yaml"
 
 # =============================================================================
 # Chat History Interface (Session persistence)

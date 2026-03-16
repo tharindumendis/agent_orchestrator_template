@@ -36,6 +36,23 @@ logger = logging.getLogger(__name__)
 _PACKAGE_DEFAULT_CONFIG = Path(__file__).parent.parent / "config.yaml"
 
 
+def _resolve_relative_paths(data: dict | list | str, base_dir: Path) -> dict | list | str:
+    """
+    Recursively resolve relative paths (starting with './') in the config data
+    to absolute paths based on the config file's directory.
+    """
+    if isinstance(data, str):
+        if data.startswith("./"):
+            return str((base_dir / data[2:]).resolve())
+        return data
+    elif isinstance(data, list):
+        return [_resolve_relative_paths(item, base_dir) for item in data]
+    elif isinstance(data, dict):
+        return {key: _resolve_relative_paths(value, base_dir) for key, value in data.items()}
+    else:
+        return data
+
+
 # ---------------------------------------------------------------------------
 # OS-specific paths
 # ---------------------------------------------------------------------------
@@ -74,11 +91,44 @@ def bootstrap_config() -> Path:
     user_config = get_app_config_dir() / "config.yaml"
 
     if user_config.exists():
+        # Ensure service_config is also available for relative paths in the user config.
+        package_service_config = _PACKAGE_DEFAULT_CONFIG.parent / "service_config"
+        user_service_config = user_config.parent / "service_config"
+        if package_service_config.exists() and not user_service_config.exists():
+            try:
+                shutil.copytree(
+                    package_service_config,
+                    user_service_config,
+                    dirs_exist_ok=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[agent_head] Failed to bootstrap service_config: %s",
+                    e,
+                )
         return user_config
 
-    # First run — copy the bundled default
+    # First run — copy the bundled default config and supporting service configs
     if _PACKAGE_DEFAULT_CONFIG.exists():
         shutil.copy2(_PACKAGE_DEFAULT_CONFIG, user_config)
+
+        # Also bootstrap the bundled service_config folder that contains
+        # default config YAMLs referenced by config.yaml (e.g. notify/rag).
+        package_service_config = _PACKAGE_DEFAULT_CONFIG.parent / "service_config"
+        user_service_config = user_config.parent / "service_config"
+        if package_service_config.exists():
+            try:
+                shutil.copytree(
+                    package_service_config,
+                    user_service_config,
+                    dirs_exist_ok=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[agent_head] Failed to bootstrap service_config: %s",
+                    e,
+                )
+
         logger.info(
             "[agent_head] First-run bootstrap: config copied to %s\n"
             "             Edit that file to customise your orchestrator settings.",
@@ -269,6 +319,10 @@ def load_config(config_path: str | None = None) -> AppConfig:
     print(f"[*] Using config: {final_path.absolute()}")
     with open(final_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+
+    # Resolve relative paths in the config to absolute paths based on config file's directory
+    config_dir = final_path.parent
+    raw = _resolve_relative_paths(raw, config_dir)
 
     # --- Agent ---
     agent_raw = raw.get("agent", {})
