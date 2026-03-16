@@ -61,7 +61,7 @@ mcp_clients:
         "ghcr.io/github/github-mcp-server"
       ]
     env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: "Your GitHub Personal Access Token here"
+      GITHUB_PERSONAL_ACCESS_TOKEN: "Your_GitHub_Personal_Access_Token_here"
       GITHUB_TOOLSETS: "all"
 
 
