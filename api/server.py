@@ -478,7 +478,8 @@ def _extract_text(content) -> str:
 # CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the API server."""
     import argparse
     import uvicorn
 
@@ -502,3 +503,7 @@ if __name__ == "__main__":
         reload=args.reload,
         log_level="warning",
     )
+
+
+if __name__ == "__main__":
+    main()

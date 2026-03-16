@@ -28,7 +28,7 @@ dependencies = [
     "langchain-google-genai>=1.0.0",
     "langchain-community>=0.3.0",
     "langgraph>=0.2.0",
-    # MCP SDK (client only — orchestrator acts as MCP client)
+    # MCP SDK (client and server support)
     "mcp>=1.0.0",
     # LangChain → MCP tool adapter
     "langchain-mcp-adapters>=0.1.0",
@@ -39,11 +39,13 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "prompt-toolkit>=3.0.52",
+    "colorama>=0.4.6",
 ]
 
 [project.scripts]
 agent-head = "main:_cli_entry"
 agent-api  = "api.server:main"
+agent-mcp  = "core.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [

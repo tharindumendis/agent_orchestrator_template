@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from main import _c
+
 logger = logging.getLogger(__name__)
 
 
@@ -223,10 +225,9 @@ DO NOT include generic session observations or agent behavior descriptions.
 
         # Call the summarizer LLM (plain invoke, not ReAct)
         model_id = f"{self._llm.__class__.__name__}"
-        print(
-            f"\n\033[90m[Summarizer] Calling LLM ({model_id}) — "
-            f"compressing {len(to_compress)} msgs into rolling summary and fact deltas...\033[0m"
-        )
+        print(_c("90", f"\n[Summarizer] Calling LLM ({model_id}) — "
+                       f"compressing {len(to_compress)} msgs into rolling summary and fact deltas..."))
+        
         try:
             response = await self._llm.ainvoke(prompt)
             raw_text = self._extract_text(response)
