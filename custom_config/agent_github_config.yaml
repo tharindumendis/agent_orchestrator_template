@@ -1,0 +1,73 @@
+# =============================================================================
+# Worker Agent Configuration
+# Clone this file to create a new specialized worker — no code changes needed.
+# =============================================================================
+
+agent:
+  name: "Github-Agent"
+  version: "1.0.0"
+  description: |
+    Run the Github Agent's specialist in remote repositories loop to complete a sub-task.
+    Args:
+        instruction: A clear, self-contained description of the task to perform.
+
+    Returns:
+        The final result produced by the agent after it has finished reasoning
+        and using its tools. A log file path is appended for traceability.
+system_prompt: |
+    You are a diligent, autonomous GitHub specialist agent. 
+    Your job is to manage repositories and workflows precisely and efficiently.
+
+    ### EFFICIENCY PROTOCOL:
+    1. READ-ONLY TASKS: For tasks like "check last commit," "list branches," or "get status," do NOT engage in multi-step planning. 
+    2. SINGLE-TURN EXECUTION: If a task can be solved with one tool call, execute that tool immediately and provide the answer. 
+    3. NO REDUNDANT REASONING: Do not explain what you are going to do for simple informational requests. Just do it.
+    4. STOP CRITERIA: Once the requested data is retrieved, stop immediately. Do not suggest further actions unless explicitly asked.
+
+    ### OPERATION WORKFLOW:
+    - Before any write operation (commit/push), verify branch and impact.
+    - Use step-by-step reasoning ONLY for complex tasks (like debugging or PR creation).
+    - For simple status checks, move straight to tool execution.
+
+    Do NOT ask for clarification — make your best effort. Only respond once the task is complete.
+    if you recive any other task not related to github, forward it to the main agent
+    with the reasoning.
+
+model:
+  provider: "ollama"
+  model_name: "qwen3-coder:480b-cloud" # Change to any model available in your Ollama instance
+  temperature: 0.0
+  base_url: "http://localhost:11434"
+
+# MCP Servers this worker connects TO as a CLIENT to get its tools.
+# Each entry starts a subprocess and connects via stdio.
+mcp_clients:
+  # - name: "filesystem-server"
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/Dev/Project"]
+  #
+  - name: "github"
+    command: "docker"
+    args: [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "-e",
+        "GITHUB_HOST",
+        "-e",
+        "GITHUB_TOOLSETS",
+        "ghcr.io/github/github-mcp-server"
+      ]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "Your GitHub Personal Access Token here"
+      GITHUB_TOOLSETS: "all"
+
+
+# How this worker exposes ITSELF as an MCP server.
+server:
+  name: "Github-Agent-server"
+  port: 8003 # HTTP/SSE transport port
+  transport: "stdio" # "stdio" or "sse"
+  host: "0.0.0.0"

@@ -1,0 +1,58 @@
+# =============================================================================
+# Worker Agent Configuration
+# Clone this file to create a new specialized worker — no code changes needed.
+# =============================================================================
+
+agent:
+  name: "CommunicationAgent"
+  version: "1.0.0"
+  description: |
+    Run the Communication Agent's (telegram, email, etc.) specialist loop to complete a sub-task.
+    Args:
+        instruction: A clear, self-contained description of the task to perform (if its about sending message provide the message clearly).
+
+    Returns:
+        The final result produced by the agent after it has finished reasoning
+        and using its tools. A log file path is appended for traceability.
+  system_prompt: |
+    You are a diligent, autonomous Communication Specialist, work with main AI agent.
+    Your primary job is to relay information between the AI system and the Human User.
+    When given a task, decide the best platform:
+    - Use Telegram for: Short alerts, urgent approvals, or status pings.
+    - Use Email for: Long reports, logs, or non-urgent documentation.
+    ALWAYS scan your outgoing text for secrets/keys and replace them with [REDACTED].
+    If it is Clear task try do it in Minimum step.
+    Step-by-step: Analyze message -> Select Platform -> Format for Platform -> Send.
+    if you recive any other task not related to communication, forward it to the main agent
+    with the reasoning.
+
+model:
+  provider: "ollama"
+  model_name: "qwen3-coder:480b-cloud" # Change to any model available in your Ollama instance
+  temperature: 0.0
+  base_url: "http://localhost:11434"
+
+# MCP Servers this worker connects TO as a CLIENT to get its tools.
+# Each entry starts a subprocess and connects via stdio.
+mcp_clients:
+  # - name: "filesystem-server"
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/Dev/Project"]
+  #
+  # - name: "brave-search"
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-brave-search"]
+  #
+  - name: "telegram"
+    command: "npx"
+    args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
+    env:
+      TELEGRAM_API_ID: "Your Telegram API ID here"
+      TELEGRAM_API_HASH: "Your Telegram API Hash here"
+
+# How this worker exposes ITSELF as an MCP server.
+server:
+  name: "communication-agent-server"
+  port: 8002 # HTTP/SSE transport port
+  transport: "stdio" # "stdio" or "sse"
+  host: "0.0.0.0"
