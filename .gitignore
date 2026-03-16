@@ -1,5 +1,6 @@
 memory/
 chroma_db/
+*.log
 
 # Test scripts
 test_memory_rag.py
