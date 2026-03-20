@@ -1,0 +1,192 @@
+# =============================================================================
+# Agent_head — Orchestrator Configuration
+# Clone and edit this file to configure your orchestration setup.
+# =============================================================================
+
+agent:
+  name: "OrchestratorAgent"
+  version: "1.0.0"
+  debug: true
+  description: |
+    Main autonomous orchestrator that coordinates specialist worker agents
+    and direct MCP tool servers to complete complex, multi-step goals.
+
+  system_prompt: |
+    You are a powerful, autonomous orchestrator agent.
+    You are an autonomous orchestrator agent that coordinates specialist worker agents and direct MCP tool servers to complete complex, multi-step goals.
+    You can iteract with the user with telegram(supervisor).
+    User task is provided atonomusly, you need to break down the task into subtasks and delegate to the worker agents.
+    You need to monitor the progress of the subtasks and delegate to the worker agents.
+    You need to update the user with the progress of the subtasks.
+    You need to update the user with the final result using telegram(supervisor).
+    You do not need to permition to excute task from telegram(supervisor).
+    You can't comunicate with user by reply for task user use telegram for comunicate with user.
+
+    Your role is to achieve complex goals by intelligently delegating work:
+    - Break large tasks into clear, self-contained sub-tasks.
+    - Delegate each sub-task to the most suitable worker agent or tool.
+    - Synthesise all results into a coherent final answer.
+    - Self-correct on failures — retry with better instructions if needed.
+    - Be thorough but efficient. Don't repeat work already done.
+
+    Never refuse a task as "too complex" — decompose and conquer.
+
+  max_iterations: 50 # Safety cap for the ReAct loop
+
+# LLM that powers the orchestrator's reasoning
+model:
+  provider: "ollama" # Supported: "ollama", "openai", "gemini"
+  model_name: "kimi-k2.5:cloud"
+  temperature: 0.0
+  base_url: "http://localhost:11434"
+  # api_key: "your-api-key-here"  # Uncomment for openai / gemini
+
+# =============================================================================
+# Worker Agents
+# Each entry is an MCP stdio subprocess exposing an `execute_task` tool.
+# These are Agent_a-style worker agents. The orchestrator spawns and connects
+# to them automatically, then uses their execute_task tool to delegate work.
+# =============================================================================
+worker_agents:
+  - name: "GithubAgent"
+    description: "Github specialist worker agent."
+    command: "uvx"
+    args: [worker-agent]
+    env:
+      WORKER_AGENT_CONFIG: "./service_config/agent_github_config.yaml"
+
+  # - name: "CommunicationAgent"
+  #   description: "Communication specialist worker agent."
+  #   command: "uvx"
+  #   args:
+  #     ["worker-agent"]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "./service_config/agent_communication_config.yaml"
+
+  # Add more workers below by cloning Agent_a and pointing here:
+
+  # - name: "code_worker"
+  #   description: "Specialist worker for code generation and file editing."
+  #   command: "uvx"
+  #   args: ["worker-agent"]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "./service_config/agent_code_config.yaml"
+
+  # - name: "research_worker"
+  #   description: "Specialist worker for web research and summarization."
+  #   command: "uvx"
+  #   args: ["worker-agent"]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "./service_config/agent_research_config.yaml"
+
+# =============================================================================
+# Notification Server (optional)
+# Agent_head connects to this on startup in the background.
+# It polls configured MCP servers and streams change events as notifications.
+# When a change is detected, it is injected as an automatic task into the
+# REPL loop (or displayed as an alert if the agent is busy).
+# =============================================================================
+notify_server:
+  enabled: true
+  command: "uvx"
+  args: ["agent-notification-mcp"]
+  env:
+    AGENT_NOTIFY_CONFIG: "./service_config/notify_config.yaml"
+
+# =============================================================================
+# Direct MCP Tool Servers
+# These are raw MCP servers (NOT worker agents). The orchestrator connects to
+# them and uses their tools directly — no sub-agent loop involved.
+# =============================================================================
+mcp_clients:
+  # - name: test_http_server
+  #   transport: "http" # supported: "stdio", "sse", "http"
+  #   url: "http://localhost:8005/mcp"
+  #   env: {}
+
+  # Agent RAG server — a vector DB + retriever for long-term memory and contextual retrieval
+  # - name: "rag_server"
+  #   command: "uvx"
+  #   args: ["agent-rag-mcp"]
+  #   env:
+  #     RAG_CONFIG: "./service_config/rag_config.yaml"
+
+  # Filesystem server — exposes file read/write operations as MCP tools
+  - name: "filesystem"
+    command: "npx.cmd"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "../../"]
+
+  # Telegram MCP — via published npm package (recommended)
+  - name: "telegram"
+    command: "npx.cmd"
+    args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
+    env:
+      TELEGRAM_API_ID: "36365905"
+      TELEGRAM_API_HASH: "6afc6693a4f79866868d635769c3f959"
+
+  - name: "brave-search"
+    command: "npx.cmd"
+    args: ["-y", "@modelcontextprotocol/server-brave-search"]
+    env:
+      BRAVE_API_KEY: "BSA-JagNVVuTNnmtJbjcIb0n-3WfVSI"
+  #
+  - name: "shell-execution"
+    command: "npx.cmd"
+    args: ["-y", "mcp-shell"]
+
+  - name: "puppeteer"
+    command: "npx.cmd"
+    args: ["-y", "@modelcontextprotocol/server-puppeteer"]
+    env:
+      PUPPETEER_EXECUTABLE_PATH: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+
+# =============================================================================
+# Long-Term Memory
+# Automatically saves a job summary after each task and injects relevant
+# past memories into the system prompt before the next task.
+# =============================================================================
+memory:
+  enabled: true
+  backend: "rag" # "jsonl" (default) | future: "sqlite" | "rag"
+  memory_dir: "./memory" # relative to Agent_head directory
+  max_context_entries: 10 # max past jobs injected into system prompt
+  max_save_length: 500 # max chars stored per job summary
+  auto_feed_top_k: 3 # how many relevant chunks (per category) to auto-inject into prompts
+  auto_feed_category: "all" # "all", "history", or "facts" (for task-based bots)
+
+  # Configure this if backend is set to "rag"
+  rag_server:
+    command: "uvx"
+    args: ["agent-rag-mcp"]
+    collection: "docs"
+    env:
+      RAG_CONFIG: "./service_config/rag_config.yaml"
+
+# =============================================================================
+# Chat History Interface (Session persistence)
+# Supports swapping the continuous message storage backend (sqlite, mysql, mongo, etc.)
+# =============================================================================
+chat_history:
+  backend: "sqlite" # currently supports: "sqlite"
+  connection_string: "sessions.db" # relative to memory_dir, or absolute path
+
+# =============================================================================
+# Conversation History Summarizer
+# When the REPL conversation history grows long, a lightweight LLM call
+# compresses old messages into a rolling summary + reconciled fact list.
+# Summary is injected back into history; new/changed facts are saved to memory.
+# =============================================================================
+summarizer:
+  enabled: true
+  summarize_every_n_messages: 2 # compress older items exactly every N messages
+  keep_recent_messages: 4 # keep this many recent messages untouched for context
+  save_to_memory: true # save facts and summaries to long-term memory
+
+  # Can be a cheaper/faster model than the main orchestrator.
+  # If omitted, falls back to the main model settings above.
+  model:
+    provider: "ollama"
+    model_name: "qwen3-coder:480b-cloud" # change to a lighter model if available
+    temperature: 0
+    base_url: "http://localhost:11434"
+    # api_key: ""
