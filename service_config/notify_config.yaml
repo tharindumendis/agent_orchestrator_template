@@ -32,10 +32,10 @@ servers:
         args: {}
 
       # Detect new messages in a specific group/channel (optional)
-      - tool: messagesList
-        args:
-          channelId: "your_channel_id_here"
-          limit: 5
+      # - tool: messagesList
+      #   args:
+      #     channelId: "your_channel_id_here"
+      #     limit: 5
 
   # ── GitHub (optional) ─────────────────────────────────────────
   # - name: github
