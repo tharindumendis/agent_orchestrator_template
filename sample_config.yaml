@@ -121,14 +121,14 @@ mcp_clients:
     command: "npx.cmd"
     args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
     env:
-      TELEGRAM_API_ID: "36365905"
-      TELEGRAM_API_HASH: "6afc6693a4f79866868d635769c3f959"
+      TELEGRAM_API_ID: ""
+      TELEGRAM_API_HASH: ""
 
   - name: "brave-search"
     command: "npx.cmd"
     args: ["-y", "@modelcontextprotocol/server-brave-search"]
     env:
-      BRAVE_API_KEY: "BSA-JagNVVuTNnmtJbjcIb0n-3WfVSI"
+      BRAVE_API_KEY: ""
   #
   - name: "shell-execution"
     command: "npx.cmd"
