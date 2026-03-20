@@ -2,11 +2,12 @@ agent:
   name: OrchestratorAgent
   version: 1.0.0
   debug: true
-  description: 'Main autonomous orchestrator that coordinates specialist worker agents
+  description:
+    "Main autonomous orchestrator that coordinates specialist worker agents
 
     and direct MCP tool servers to complete complex, multi-step goals.
 
-    '
+    "
   system_prompt: 'You are a powerful, autonomous orchestrator agent.
 
     You are an autonomous orchestrator agent that coordinates specialist worker agents
@@ -51,43 +52,43 @@ model:
   model_name: qwen3-coder:480b-cloud
   temperature: 0.2
   base_url: http://localhost:11434
-  api_key: ''
+  api_key: ""
 worker_agents:
-- name: GithubAgent
-  description: Github specialist worker agent.
-  command: uvx
-  args:
-  - worker-agent
-  env:
-    WORKER_AGENT_CONFIG: ./service_config/workers/agent_github_config.yaml
+  - name: GithubAgent
+    description: Github specialist worker agent.
+    command: uvx
+    args:
+      - worker-agent
+    env:
+      WORKER_AGENT_CONFIG: ./service_config/workers/agent_github_config.yaml
 notify_server:
   enabled: true
   command: uvx
   args:
-  - agent-notification-mcp
+    - agent-notification-mcp
   env:
     AGENT_NOTIFY_CONFIG: ./service_config/notify_config.yaml
 mcp_clients:
-- name: filesystem
-  transport: stdio
-  command: npx.cmd
-  args:
-  - -y
-  - '@modelcontextprotocol/server-filesystem'
-  - ../../
-  env: {}
-- name: telegram
-  transport: stdio
-  command: npx.cmd
-  args:
-  - -y
-  - '@tharindumendis100/tgcli'
-  - mcp
-  - --transport
-  - stdio
-  env:
-    TELEGRAM_API_ID: Your Telegram API ID here
-    TELEGRAM_API_HASH: Your Telegram API Hash here
+  - name: filesystem
+    transport: stdio
+    command: npx.cmd
+    args:
+      - -y
+      - "@modelcontextprotocol/server-filesystem"
+      - ../../
+    env: {}
+  - name: telegram
+    transport: stdio
+    command: npx.cmd
+    args:
+      - -y
+      - "@tharindumendis100/tgcli"
+      - mcp
+      - --transport
+      - stdio
+    env:
+      TELEGRAM_API_ID: Your Telegram API ID here
+      TELEGRAM_API_HASH: Your Telegram API Hash here
 memory:
   enabled: true
   backend: rag
@@ -99,7 +100,7 @@ memory:
   rag_server:
     command: uvx
     args:
-    - agent-rag-mcp
+      - agent-rag-mcp
     collection: docs
     env:
       RAG_CONFIG: ./service_config/rag_config.yaml
