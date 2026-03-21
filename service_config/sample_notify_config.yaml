@@ -16,26 +16,25 @@ poll_interval: 15
 
 # Debug mode: logs every poll cycle to a file.
 debug: true
-log_file: "agent_notify.log"
+log_file: "./logs/agent_notify.log"
 
 servers:
   # ── Telegram ──────────────────────────────────────────────────
-  - name: telegram
-    command: npx
-    args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
+
+  - name: tele_bot_mcp
+    transport: stdio
+    command: uvx
+    args:
+      - agent-telegram-mcp
     env:
-      TELEGRAM_API_ID: "your_telegram_api_id"
-      TELEGRAM_API_HASH: "your_telegram_api_hash"
+      TELEGRAM_BOT_TOKEN: "your_bot_token"
     tools:
       # Detect new incoming messages in your personal inbox
-      - tool: listActiveChannels
-        args: {}
-
-      # Detect new messages in a specific group/channel (optional)
-      # - tool: messagesList
-      #   args:
-      #     channelId: "your_channel_id_here"
-      #     limit: 5
+      - tool: telegram_get_updates
+        args:
+          params:
+            limit: 20
+            offset: 0
 
   # ── GitHub (optional) ─────────────────────────────────────────
   # - name: github
@@ -48,7 +47,7 @@ servers:
   #     - tool: list_issues
   #       args:
   #         owner: "your_github_username"
-  #         repo:  "your_repo_name"
+  #         repo: "your_repo_name"
   #         state: "open"
 
   # ── Any other MCP server ──────────────────────────────────────
