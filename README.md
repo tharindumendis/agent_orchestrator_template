@@ -87,6 +87,10 @@ Agent_head acts as the "brain" of your agent orchestra:
 ### Quick Setup
 
 ```bash
+uv tool install --force git+https://github.com/tharindumendis/agent_orchestrator_template.git
+```
+
+```bash
 # Clone the repo
 git clone <repository-url>
 cd agent_orchestrator_template
