@@ -77,18 +77,29 @@ mcp_clients:
       - "@modelcontextprotocol/server-filesystem"
       - ../../
     env: {}
-  - name: telegram
+  # - name: telegram
+  #   transport: stdio
+  #   command: npx.cmd
+  #   args:
+  #     - -y
+  #     - "@tharindumendis100/tgcli"
+  #     - mcp
+  #     - --transport
+  #     - stdio
+  #   env:
+  #     TELEGRAM_API_ID: Your Telegram API ID here
+  #     TELEGRAM_API_HASH: Your Telegram API Hash here
+  - name: tele_bot_mcp
     transport: stdio
-    command: npx.cmd
+    command: uv
     args:
-      - -y
-      - "@tharindumendis100/tgcli"
-      - mcp
-      - --transport
-      - stdio
+      - --directory
+      - D:/DEV/mcp/universai/orchestra/tele_bot_mcp
+      - run
+      - tele-bot-mcp
     env:
-      TELEGRAM_API_ID: Your Telegram API ID here
-      TELEGRAM_API_HASH: Your Telegram API Hash here
+      TELEGRAM_BOT_TOKEN: "your_bot_token"   # Set your bot token here or use a .env file in the package dir
+
 memory:
   enabled: true
   backend: rag
