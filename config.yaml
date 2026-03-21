@@ -65,6 +65,9 @@ notify_server:
   enabled: true
   command: uvx
   args:
+    - --directory
+    - D:/DEV/mcp/universai/orchestra/Agent_notify
+    - run
     - agent-notification-mcp
   env:
     AGENT_NOTIFY_CONFIG: ./service_config/notify_config.yaml
