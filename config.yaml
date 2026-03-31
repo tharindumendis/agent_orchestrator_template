@@ -35,11 +35,11 @@ agent:
 
 # LLM that powers the orchestrator's reasoning
 model:
-  provider: "ollama" # Supported: "ollama", "openai", "gemini"
-  model_name: "kimi-k2.5:cloud"
+  provider: "ollama" # Supported: "ollama", "openai", "gemini", "nvidia (moonshotai/kimi-k2.2 -sample)"
+  model_name: "qwen3-coder:480b-cloud"
   temperature: 0.0
   base_url: "http://localhost:11434"
-  # api_key: "your-api-key-here"  # Uncomment for openai / gemini
+  # api_key: "" # Uncomment for openai / gemini
 
 # =============================================================================
 # Worker Agents

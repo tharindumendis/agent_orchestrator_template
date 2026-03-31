@@ -789,6 +789,8 @@ Examples:
                    help="API key override.")
     p.add_argument("--base-url", type=str, default=None,
                    help="Base URL override.")
+    p.add_argument("--edit", action="store_true", default=False,
+                   help="Copy the bundled config files to a location for editing.")
     return p.parse_args()
 
 
@@ -796,8 +798,62 @@ Examples:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _export_config(dest_dir: str) -> None:
+    """Copy the bundled config.yaml and service_config/ to *dest_dir*."""
+    import shutil
+    from pathlib import Path
+
+    dest = Path(dest_dir).resolve()
+    pkg_root = Path(__file__).parent
+    pkg_config = pkg_root / "config.yaml"
+    pkg_service = pkg_root / "service_config"
+
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Copy config.yaml
+    dest_config = dest / "config.yaml"
+    if dest_config.exists():
+        overwrite = input(f"  config.yaml already exists at {dest_config}. Overwrite? [y/N] ").strip().lower()
+        if overwrite != "y":
+            print("  Skipped config.yaml")
+        else:
+            shutil.copy2(pkg_config, dest_config)
+            print(f"  ✓ Copied config.yaml → {dest_config}")
+    else:
+        shutil.copy2(pkg_config, dest_config)
+        print(f"  ✓ Copied config.yaml → {dest_config}")
+
+    # Copy service_config/
+    dest_service = dest / "service_config"
+    if dest_service.exists():
+        overwrite = input(f"  service_config/ already exists at {dest_service}. Overwrite? [y/N] ").strip().lower()
+        if overwrite != "y":
+            print("  Skipped service_config/")
+        else:
+            shutil.copytree(pkg_service, dest_service, dirs_exist_ok=True)
+            print(f"  ✓ Copied service_config/ → {dest_service}")
+    else:
+        shutil.copytree(pkg_service, dest_service)
+        print(f"  ✓ Copied service_config/ → {dest_service}")
+
+    print(f"\n  Done! Edit your config at: {dest_config}")
+    print(f"  Then run: agent-head --config \"{dest_config}\"")
+
+
 def _cli_entry() -> None:
     args = parse_args()
+
+    # --edit: export config files for editing and exit
+    if args.edit:
+        print("\n" + "═" * 60)
+        print("  Agent_head — Export Config for Editing")
+        print("═" * 60)
+        dest = input("\n  Enter destination directory: ").strip()
+        if not dest:
+            print("  No path provided. Aborting.")
+            return
+        _export_config(dest)
+        return
 
     common = dict(
         config_path=args.config,

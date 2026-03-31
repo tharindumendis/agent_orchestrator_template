@@ -40,6 +40,7 @@ dependencies = [
     "uvicorn[standard]>=0.29.0",
     "prompt-toolkit>=3.0.52",
     "colorama>=0.4.6",
+    "langchain-nvidia-ai-endpoints>=1.2.1",
 ]
 
 [project.scripts]
