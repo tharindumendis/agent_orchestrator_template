@@ -32,7 +32,24 @@ def get_llm(model_cfg: Any):
             )
         except ImportError as e:
             raise ImportError("langchain_google_genai required for gemini provider") from e
-            
+
+    elif provider == "nvidia":
+        try:
+            from langchain_nvidia_ai_endpoints import ChatNVIDIA
+            kwargs = dict(
+                model=model_cfg.model_name,
+                temperature=model_cfg.temperature,
+                api_key=model_cfg.api_key,
+            )
+            if model_cfg.base_url and model_cfg.base_url != "http://localhost:11434":
+                kwargs["base_url"] = model_cfg.base_url
+            return ChatNVIDIA(**kwargs)
+        except ImportError as e:
+            raise ImportError(
+                "langchain_nvidia_ai_endpoints required for nvidia provider. "
+                "Install with: pip install langchain-nvidia-ai-endpoints"
+            ) from e
+
     else:
         # Ollama: local vs cloud routing
         is_local = (
