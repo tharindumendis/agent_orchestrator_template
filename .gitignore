@@ -62,3 +62,4 @@ mcp_research_report.md
 sample_config.yaml
 core/__pycache__/__init__.cpython-313.pyc
 __pycache__/*
+deployments/*
