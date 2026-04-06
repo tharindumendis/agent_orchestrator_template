@@ -309,6 +309,47 @@ async def interactive_loop(
             except Exception as _mem_exc:
                 print(f"  {_c(RED, '[!]')} Memory tools failed to load: {_mem_exc}")
 
+        # ----------------------------------------------------------------
+        # PHASE 2.6 — Image tools (read, save, screenshot, OCR)
+        # ----------------------------------------------------------------
+        try:
+            from core.image_tools import get_image_tools
+            _img_cfg = config.image_tools
+            _img_tools = get_image_tools(
+                enabled=_img_cfg.enabled,
+                enable_save=_img_cfg.enable_save,
+                enable_screenshot=_img_cfg.enable_screenshot,
+                enable_ocr=_img_cfg.enable_ocr,
+                screenshot_dir=_img_cfg.screenshot_dir,
+            )
+            if _img_tools:
+                all_tools.extend(_img_tools)
+                print(f"  {_c(GREEN, '[+]')} Image → {[t.name for t in _img_tools]}")
+        except Exception as _img_exc:
+            print(f"  {_c(RED, '[!]')} Image tools failed to load: {_img_exc}")
+
+        # ----------------------------------------------------------------
+        # PHASE 2.7 — Audio tools (transcribe, TTS, save, record)
+        # ----------------------------------------------------------------
+        try:
+            from core.audio_tools import get_audio_tools
+            _aud_cfg = config.audio_tools
+            _aud_tools = get_audio_tools(
+                enabled=_aud_cfg.enabled,
+                enable_transcribe=_aud_cfg.enable_transcribe,
+                enable_tts=_aud_cfg.enable_tts,
+                enable_save=_aud_cfg.enable_save,
+                enable_record=_aud_cfg.enable_record,
+                enable_play=_aud_cfg.enable_play,
+                enable_speak=_aud_cfg.enable_speak,
+                audio_dir=_aud_cfg.audio_dir,
+            )
+            if _aud_tools:
+                all_tools.extend(_aud_tools)
+                print(f"  {_c(GREEN, '[+]')} Audio → {[t.name for t in _aud_tools]}")
+        except Exception as _aud_exc:
+            print(f"  {_c(RED, '[!]')} Audio tools failed to load: {_aud_exc}")
+
         # Build Orchestrator LLM
         from core.llm import get_llm
         try:

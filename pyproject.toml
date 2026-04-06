@@ -41,6 +41,16 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "colorama>=0.4.6",
     "langchain-nvidia-ai-endpoints>=1.2.1",
+    # Image tools
+    "mss>=9.0.0",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
+    # Audio tools
+    "SpeechRecognition>=3.10.0",
+    "pydub>=0.25.0",
+    "gTTS>=2.4.0",
+    "sounddevice>=0.4.0",
+    "scipy>=1.10.0",
 ]
 
 [project.scripts]

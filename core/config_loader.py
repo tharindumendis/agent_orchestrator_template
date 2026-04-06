@@ -259,6 +259,29 @@ class NotifyServerConfig:
 
 
 @dataclass
+class ImageToolsConfig:
+    """Built-in image tools (read, save, screenshot, OCR)."""
+    enabled: bool = True             # master switch for all image tools
+    enable_save: bool = True         # save_image tool
+    enable_screenshot: bool = True   # screenshot tool
+    enable_ocr: bool = True          # extract_text tool (requires pytesseract)
+    screenshot_dir: str = "./screenshots"  # default dir for saved screenshots
+
+
+@dataclass
+class AudioToolsConfig:
+    """Built-in audio tools (transcribe, TTS, save, record, play, speak)."""
+    enabled: bool = True
+    enable_transcribe: bool = True   # transcribe_audio (STT)
+    enable_tts: bool = True          # text_to_speech
+    enable_save: bool = True         # save_audio
+    enable_record: bool = True       # record_audio
+    enable_play: bool = True         # play_audio
+    enable_speak: bool = True        # speak (TTS + play)
+    audio_dir: str = "./audio"       # default dir for saved audio files
+
+
+@dataclass
 class AppConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -268,6 +291,8 @@ class AppConfig:
     chat_history: ChatHistoryConfig = field(default_factory=ChatHistoryConfig)
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
     notify_server: NotifyServerConfig = field(default_factory=NotifyServerConfig)
+    image_tools: ImageToolsConfig = field(default_factory=ImageToolsConfig)
+    audio_tools: AudioToolsConfig = field(default_factory=AudioToolsConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +454,29 @@ def load_config(config_path: str | None = None) -> AppConfig:
         env=notify_raw.get("env", {}),
     )
 
+    # --- Image Tools ---
+    img_raw = raw.get("image_tools", {})
+    image_tools = ImageToolsConfig(
+        enabled=bool(img_raw.get("enabled", True)),
+        enable_save=bool(img_raw.get("enable_save", True)),
+        enable_screenshot=bool(img_raw.get("enable_screenshot", True)),
+        enable_ocr=bool(img_raw.get("enable_ocr", True)),
+        screenshot_dir=img_raw.get("screenshot_dir", "./screenshots"),
+    )
+
+    # --- Audio Tools ---
+    aud_raw = raw.get("audio_tools", {})
+    audio_tools = AudioToolsConfig(
+        enabled=bool(aud_raw.get("enabled", True)),
+        enable_transcribe=bool(aud_raw.get("enable_transcribe", True)),
+        enable_tts=bool(aud_raw.get("enable_tts", True)),
+        enable_save=bool(aud_raw.get("enable_save", True)),
+        enable_record=bool(aud_raw.get("enable_record", True)),
+        enable_play=bool(aud_raw.get("enable_play", True)),
+        enable_speak=bool(aud_raw.get("enable_speak", True)),
+        audio_dir=aud_raw.get("audio_dir", "./audio"),
+    )
+
     return AppConfig(
         agent=agent,
         model=model,
@@ -438,4 +486,6 @@ def load_config(config_path: str | None = None) -> AppConfig:
         chat_history=chat_history,
         summarizer=summarizer,
         notify_server=notify_server,
+        image_tools=image_tools,
+        audio_tools=audio_tools,
     )

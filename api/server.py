@@ -167,6 +167,43 @@ class AgentSession:
                     except Exception as exc:
                         logger.warning("[Session %s] Memory failed: %s", self.session_id, exc)
 
+                # ── Image tools (read, save, screenshot, OCR) ─────────────────────
+                try:
+                    from core.image_tools import get_image_tools
+                    _img_cfg = self.config.image_tools
+                    _img_tools = get_image_tools(
+                        enabled=_img_cfg.enabled,
+                        enable_save=_img_cfg.enable_save,
+                        enable_screenshot=_img_cfg.enable_screenshot,
+                        enable_ocr=_img_cfg.enable_ocr,
+                        screenshot_dir=_img_cfg.screenshot_dir,
+                    )
+                    if _img_tools:
+                        all_tools.extend(_img_tools)
+                        logger.info("[Session %s] Image → %s", self.session_id, [t.name for t in _img_tools])
+                except Exception as exc:
+                    logger.warning("[Session %s] Image tools failed: %s", self.session_id, exc)
+
+                # ── Audio tools (transcribe, TTS, save, record) ───────────────────
+                try:
+                    from core.audio_tools import get_audio_tools
+                    _aud_cfg = self.config.audio_tools
+                    _aud_tools = get_audio_tools(
+                        enabled=_aud_cfg.enabled,
+                        enable_transcribe=_aud_cfg.enable_transcribe,
+                        enable_tts=_aud_cfg.enable_tts,
+                        enable_save=_aud_cfg.enable_save,
+                        enable_record=_aud_cfg.enable_record,
+                        enable_play=_aud_cfg.enable_play,
+                        enable_speak=_aud_cfg.enable_speak,
+                        audio_dir=_aud_cfg.audio_dir,
+                    )
+                    if _aud_tools:
+                        all_tools.extend(_aud_tools)
+                        logger.info("[Session %s] Audio → %s", self.session_id, [t.name for t in _aud_tools])
+                except Exception as exc:
+                    logger.warning("[Session %s] Audio tools failed: %s", self.session_id, exc)
+
                 # ── Build graph ────────────────────────────────────────────────────
                 llm = get_llm(self.config.model)
                 tool_node = ToolNode(all_tools, handle_tool_errors=True)
