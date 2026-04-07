@@ -225,3 +225,18 @@ audio_tools:
   enable_play: true            # play_audio: play audio through speakers
   enable_speak: true           # speak: TTS + immediate playback (agent voice)
   audio_dir: "./audio"         # directory for auto-saved audio files
+
+# =============================================================================
+# MCP Server Mode
+# Settings for when Agent_head is run as an MCP server (via `agent-mcp` command).
+# This exposes the full orchestrator as MCP tools that other agents or clients
+# (Claude Desktop, Cursor, other Agent_head instances) can connect to.
+# =============================================================================
+mcp_server:
+  name: "agent-orchestrator"     # MCP server identity name
+  host: "127.0.0.1"             # bind host for SSE/HTTP transports
+  port: 8000                    # bind port for SSE/HTTP transports
+  default_progress: "summary"   # progress streaming level: "none" | "summary" | "full"
+                                # none    — only return final answer
+                                # summary — stream tool call names + success/failure
+                                # full    — stream everything (tool args, results, LLM text)

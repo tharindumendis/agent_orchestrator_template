@@ -282,6 +282,15 @@ class AudioToolsConfig:
 
 
 @dataclass
+class MCPServerConfig:
+    """Settings for running Agent_head as an MCP server."""
+    name: str = "agent-orchestrator"           # MCP server name
+    host: str = "127.0.0.1"                    # bind host for SSE/HTTP transport
+    port: int = 8000                           # bind port for SSE/HTTP transport
+    default_progress: str = "summary"          # "none" | "summary" | "full"
+
+
+@dataclass
 class AppConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -293,6 +302,7 @@ class AppConfig:
     notify_server: NotifyServerConfig = field(default_factory=NotifyServerConfig)
     image_tools: ImageToolsConfig = field(default_factory=ImageToolsConfig)
     audio_tools: AudioToolsConfig = field(default_factory=AudioToolsConfig)
+    mcp_server: MCPServerConfig = field(default_factory=MCPServerConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +487,15 @@ def load_config(config_path: str | None = None) -> AppConfig:
         audio_dir=aud_raw.get("audio_dir", "./audio"),
     )
 
+    # --- MCP Server ---
+    mcp_raw = raw.get("mcp_server", {})
+    mcp_server = MCPServerConfig(
+        name=mcp_raw.get("name", "agent-orchestrator"),
+        host=mcp_raw.get("host", "127.0.0.1"),
+        port=int(mcp_raw.get("port", 8000)),
+        default_progress=mcp_raw.get("default_progress", "summary"),
+    )
+
     return AppConfig(
         agent=agent,
         model=model,
@@ -488,4 +507,5 @@ def load_config(config_path: str | None = None) -> AppConfig:
         notify_server=notify_server,
         image_tools=image_tools,
         audio_tools=audio_tools,
+        mcp_server=mcp_server,
     )
