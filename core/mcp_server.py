@@ -976,7 +976,7 @@ Examples:
 
     # ── Recreate the FastMCP with the loaded config name ──────────────────
     global mcp
-    mcp = FastMCP(_config.mcp_server.name)
+    mcp = FastMCP(_config.mcp_server.name, host=host, port=port)
 
     # Re-register all tools on the new instance
     _register_tools(mcp)
@@ -996,7 +996,7 @@ Examples:
             f"with SSE transport on {host}:{port}...",
             file=sys.stderr,
         )
-        mcp.run(transport="sse", host=host, port=port)
+        mcp.run(transport="sse")
 
     elif args.transport == "http":
         print(
@@ -1004,7 +1004,7 @@ Examples:
             f"with Streamable HTTP transport on {host}:{port}...",
             file=sys.stderr,
         )
-        mcp.run(transport="streamable-http", host=host, port=port)
+        mcp.run(transport="streamable-http")
 
 
 def _register_tools(server: FastMCP) -> None:
