@@ -288,6 +288,7 @@ class MCPServerConfig:
     host: str = "127.0.0.1"                    # bind host for SSE/HTTP transport
     port: int = 8000                           # bind port for SSE/HTTP transport
     default_progress: str = "summary"          # "none" | "summary" | "full"
+    log_dir: str = "./logs/mcp"                # directory for MCP server logs
 
 
 @dataclass
@@ -494,6 +495,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
         host=mcp_raw.get("host", "127.0.0.1"),
         port=int(mcp_raw.get("port", 8000)),
         default_progress=mcp_raw.get("default_progress", "summary"),
+        log_dir=mcp_raw.get("log_dir", "./logs/mcp"),
     )
 
     return AppConfig(

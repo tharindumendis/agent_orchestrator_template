@@ -164,12 +164,12 @@ memory:
   auto_feed_category: "all" # "all", "history", or "facts" (for task-based bots)
 
   # Configure this if backend is set to "rag"
-  rag_server:
-    command: "uvx"
-    args: ["agent-rag-mcp"]
-    collection: "docs"
-    env:
-      RAG_CONFIG: "./service_config/rag_config.yaml"
+rag_server:
+  command: "uvx"
+  args: ["agent-rag-mcp"]
+  collection: "docs"
+  env:
+    RAG_CONFIG: "./service_config/rag_config.yaml"
 
 # =============================================================================
 # Chat History Interface (Session persistence)
@@ -236,6 +236,7 @@ mcp_server:
   name: "agent-orchestrator"     # MCP server identity name
   host: "127.0.0.1"             # bind host for SSE/HTTP transports
   port: 8000                    # bind port for SSE/HTTP transports
+  log_dir: "./logs/mcp"         # directory for MCP server + job logs
   default_progress: "summary"   # progress streaming level: "none" | "summary" | "full"
                                 # none    — only return final answer
                                 # summary — stream tool call names + success/failure

@@ -48,8 +48,12 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP, Context
 
 from core.config_loader import AppConfig, load_config
+from core.job_logger import JobLogger
 
 logger = logging.getLogger(__name__)
+
+# Resolved log directory — set from config in main()
+_log_dir: Path | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -111,6 +115,7 @@ class AgentSession:
         self._bg_task: asyncio.Task | None = None
         self._all_tools: list = []
         self._busy = False                    # whether a chat/task is running
+        self._job_logger: JobLogger | None = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -120,14 +125,17 @@ class AgentSession:
             return
         self._bg_task = asyncio.create_task(self._run_stack())
         await self._boot_complete.wait()
+        logger.info("[Session %s] Booted successfully", self.session_id)
 
     async def shutdown(self) -> None:
         """Tear down MCP connections.  History is already persisted per-turn."""
+        logger.info("[Session %s] Shutting down...", self.session_id)
         self._shutdown_event.set()
         if self._bg_task:
             await self._bg_task
             self._bg_task = None
         self._ready = False
+        logger.info("[Session %s] Shutdown complete", self.session_id)
 
     def add_participant(self, agent_name: str) -> None:
         if agent_name and agent_name not in self.participants:
@@ -160,6 +168,25 @@ class AgentSession:
             self._busy = True
             self.last_active = time.time()
 
+            # ── Start job log ─────────────────────────────────────────
+            sender = agent_name or "anonymous"
+            jl = JobLogger(
+                task=f"[MCP:{self.session_id}] [{sender}] {message[:200]}",
+                agent_name=self.config.agent.name,
+            )
+            # Override job log directory to use config's log_dir
+            if _log_dir:
+                _job_log_dir = _log_dir / "jobs"
+                _job_log_dir.mkdir(parents=True, exist_ok=True)
+                ts = jl.started_at.strftime("%Y-%m-%d_%H-%M-%S")
+                jl.log_path = _job_log_dir / f"{ts}_{jl.job_id}.log"
+                jl._write_header()
+            self._job_logger = jl
+            logger.info(
+                "[Session %s] Chat from '%s': %s",
+                self.session_id, sender, message[:100],
+            )
+
             try:
                 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
@@ -187,13 +214,22 @@ class AgentSession:
                                 f"[System: Relevant Past Memory]\n{context}\n\n"
                                 f"{tagged_message}"
                             )
+                            jl.log_step("RAG_INJECT", "memory", output=f"{len(context)} chars injected")
+                            logger.debug(
+                                "[Session %s] RAG injected %d chars",
+                                self.session_id, len(context),
+                            )
                     except Exception:
                         pass
 
                 self.conversation_history.append(HumanMessage(content=task_text))
 
                 if ctx and progress != "none":
-                    await ctx.info(f"Processing message from '{agent_name or 'anonymous'}'...")
+                    await ctx.info(f"Processing message from '{sender}'...")
+                logger.debug(
+                    "[Session %s] Starting ReAct graph for '%s'",
+                    self.session_id, sender,
+                )
 
                 # ── Run the ReAct graph ───────────────────────────────────
                 final_answer = ""
@@ -209,16 +245,38 @@ class AgentSession:
                         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                             for tc in last_msg.tool_calls:
                                 tc_name = tc.get("name", "unknown")
+                                tc_args = tc.get("args", {})
+                                jl.log_step(
+                                    "TOOL_CALL", tc_name,
+                                    details=tc_args,
+                                )
+                                logger.info(
+                                    "[Session %s] → TOOL_CALL: %s",
+                                    self.session_id, tc_name,
+                                )
+                                logger.debug(
+                                    "[Session %s]   args: %s",
+                                    self.session_id,
+                                    json.dumps(tc_args, ensure_ascii=False)[:500],
+                                )
                                 if ctx and progress in ("summary", "full"):
                                     detail = ""
                                     if progress == "full":
-                                        args_str = json.dumps(tc.get("args", {}), ensure_ascii=False)
+                                        args_str = json.dumps(tc_args, ensure_ascii=False)
                                         detail = f" | args: {args_str[:500]}"
                                     await ctx.info(f"[Tool Call] {tc_name}{detail}")
 
                         if last_msg.content:
                             content = _extract_text(last_msg.content)
                             final_answer = content
+                            logger.info(
+                                "[Session %s] ← LLM: %s",
+                                self.session_id, content[:200],
+                            )
+                            logger.debug(
+                                "[Session %s]   LLM full: %s",
+                                self.session_id, content[:2000],
+                            )
                             if ctx and progress == "full":
                                 await ctx.info(f"[LLM] {content[:1000]}")
 
@@ -228,6 +286,21 @@ class AgentSession:
                         is_error = any(
                             kw in content.lower()
                             for kw in ("error", "exception", "traceback")
+                        )
+                        jl.log_step(
+                            "TOOL_RESULT", tool_name,
+                            output=content[:2000],
+                            success=not is_error,
+                            error=content[:500] if is_error else None,
+                        )
+                        status_str = "❌ FAILED" if is_error else "✅ OK"
+                        logger.info(
+                            "[Session %s] ← TOOL_RESULT: %s %s",
+                            self.session_id, tool_name, status_str,
+                        )
+                        logger.debug(
+                            "[Session %s]   output: %s",
+                            self.session_id, content[:500],
                         )
                         if ctx and progress in ("summary", "full"):
                             status = "❌" if is_error else "✅"
@@ -291,10 +364,18 @@ class AgentSession:
                             "[Session %s] Summariser failed: %s", self.session_id, exc
                         )
 
-                return final_answer or "Orchestrator completed but produced no text output."
+                result = final_answer or "Orchestrator completed but produced no text output."
+                jl.finish(final_answer=result, success=True)
+                logger.info(
+                    "[Session %s] Chat complete — log: %s",
+                    self.session_id, jl.path,
+                )
+                return result
 
             except Exception as exc:
                 logger.exception("[Session %s] Chat error", self.session_id)
+                jl.log_step("ERROR", "chat", error=str(exc))
+                jl.finish(final_answer=str(exc), success=False)
                 # Pop the failed user message so history stays consistent
                 from langchain_core.messages import HumanMessage
                 if (self.conversation_history
@@ -304,6 +385,7 @@ class AgentSession:
 
             finally:
                 self._busy = False
+                self._job_logger = None
 
     # ── Internal: background stack ────────────────────────────────────────
 
@@ -314,7 +396,6 @@ class AgentSession:
         from langgraph.prebuilt import create_react_agent, ToolNode
         from core.llm import get_llm
         from core.mcp_loader import load_mcp_server_tools
-        from typing import Literal as LitType
 
         try:
             async with AsyncExitStack() as stack:
@@ -384,7 +465,7 @@ class AgentSession:
                         @lc_tool
                         def memory_search(
                             query: str,
-                            category: LitType["all", "history", "facts"] = "all",
+                            category: Literal["all", "history", "facts"] = "all",
                         ) -> str:
                             """Search long-term memory for past tasks, results, and saved facts."""
                             return _backend.search(query, category=category, session_id=_sid)
@@ -959,16 +1040,45 @@ Examples:
     if args.config:
         os.environ["ORCHESTRATOR_CONFIG"] = args.config
 
-    # ── Configure logging ─────────────────────────────────────────────────
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        stream=sys.stderr,
-    )
-
-    # ── Load config (resolves the global) ─────────────────────────────────
-    global _config
+    # ── Load config first (need log_dir) ───────────────────────────────
+    global _config, _log_dir
     _config = load_config(args.config)
+
+    # ── Resolve log directory from config ─────────────────────────────
+    _log_path = Path(_config.mcp_server.log_dir)
+    if not _log_path.is_absolute():
+        # Resolve relative to config file dir or CWD
+        _log_path = Path.cwd() / _config.mcp_server.log_dir
+    _log_path.mkdir(parents=True, exist_ok=True)
+    _log_dir = _log_path
+
+    # ── Configure logging ─────────────────────────────────────────────
+    # Log to BOTH stderr (for MCP transport) and a file (for persistence)
+    # When debug=true in config, show ALL logs in terminal (DEBUG level)
+    _log_file = _log_dir / f"mcp_{time.strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    _log_level = logging.DEBUG if _config.agent.debug else logging.INFO
+    _log_fmt = logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
+
+    # Explicitly configure root logger — basicConfig silently fails if
+    # Uvicorn/FastMCP/etc. have already registered handlers.
+    _root = logging.getLogger()
+    _root.setLevel(_log_level)
+    # Remove any pre-existing handlers to avoid duplicates on reload
+    _root.handlers.clear()
+
+    _stderr_handler = logging.StreamHandler(sys.stderr)
+    _stderr_handler.setLevel(_log_level)
+    _stderr_handler.setFormatter(_log_fmt)
+    _root.addHandler(_stderr_handler)
+
+    _file_handler = logging.FileHandler(_log_file, encoding="utf-8")
+    _file_handler.setLevel(logging.DEBUG)     # file always gets everything
+    _file_handler.setFormatter(_log_fmt)
+    _root.addHandler(_file_handler)
+
+    logger.info("MCP server log: %s", _log_file)
+    logger.info("Job logs dir:   %s", _log_dir / "jobs")
+    logger.info("Log level:      %s", "DEBUG" if _config.agent.debug else "INFO")
 
     # ── Resolve host/port from CLI > config ───────────────────────────────
     host = args.host or _config.mcp_server.host
