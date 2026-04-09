@@ -448,55 +448,66 @@ class AgentSession:
                 # ── Memory tools ──────────────────────────────────────────
                 if self.config.memory.enabled:
                     from core.memory import get_backend as _get_backend
-
-                    _mem_dir = Path(self.config.memory.memory_dir)
+                    from pathlib import Path as _Path
+                    _mem_dir = _Path(self.config.memory.memory_dir)
                     if not _mem_dir.is_absolute():
-                        _mem_dir = Path(__file__).parent.parent / self.config.memory.memory_dir
+                        _mem_dir = _Path(__file__).parent / self.config.memory.memory_dir
                     try:
-                        self.backend = _get_backend(
+                        backend = _get_backend(
                             backend_type=self.config.memory.backend,
                             memory_dir=_mem_dir,
                             max_save_length=self.config.memory.max_save_length,
                             rag_server_cfg=self.config.memory.rag_server,
                         )
-                        _backend = self.backend
-                        _sid = self.session_id
-
+                        from langchain_core.tools import tool as lc_tool
+                        
                         @lc_tool
-                        def memory_search(
-                            query: str,
-                            category: Literal["all", "history", "facts"] = "all",
-                        ) -> str:
-                            """Search long-term memory for past tasks, results, and saved facts."""
-                            return _backend.search(query, category=category, session_id=_sid)
+                        def memory_search(query: str, category: Literal["all", "history", "facts"] = "all") -> str:
+                            """
+                            Search your long-term memory for past tasks and results related to *query*.
+                            Use category="history" for looking up past tool executions and workflows.
+                            Use category="facts" for looking up saved notes, preferences, or project details.
+
+                            args:
+                                query (str): The search query.
+                                category (Literal["all", "history", "facts"]): The category to search in. Defaults to "all".
+                            """
+                            return backend.search(query, category=category)
 
                         @lc_tool
                         def memory_save(fact: str) -> str:
-                            """Save an important fact to long-term memory for future sessions."""
-                            return _backend.save_fact(fact)
+                            """
+                            Save an important global fact or note to your long-term memory for future sessions.
+                            DO STORE INFORMATION THAT WILL NEED FOR FUTURE TASKS.
+                            YOU MUST:
+                            DO NOT STORE ANY PRIVATE OR SENSITIVE INFORMATIONS.
+
+                            args:
+                                fact (str): The fact to save.
+                            """
+                            return backend.save_fact(fact)
 
                         all_tools.extend([memory_search, memory_save])
                         logger.info("[Session %s] Memory tools loaded", self.session_id)
-                    except Exception as exc:
+                    except Exception as _mem_exc:
                         logger.warning(
-                            "[Session %s] Memory failed: %s", self.session_id, exc
-                        )
+                            "[Session %s] Memory failed: %s", self.session_id, _mem_exc)
 
-                # ── Image tools ───────────────────────────────────────────
-                try:
-                    from core.image_tools import get_image_tools
-                    _img_cfg = self.config.image_tools
-                    _img_tools = get_image_tools(
-                        enabled=_img_cfg.enabled,
-                        enable_save=_img_cfg.enable_save,
-                        enable_screenshot=_img_cfg.enable_screenshot,
-                        enable_ocr=_img_cfg.enable_ocr,
-                        screenshot_dir=_img_cfg.screenshot_dir,
-                    )
-                    if _img_tools:
-                        all_tools.extend(_img_tools)
-                except Exception as exc:
-                    logger.warning("[Session %s] Image tools failed: %s", self.session_id, exc)
+                        # ── Image tools ───────────────────────────────────────────
+                        try:
+                            from core.image_tools import get_image_tools
+                            _img_cfg = self.config.image_tools
+                            _img_tools = get_image_tools(
+                                enabled=_img_cfg.enabled,
+                                enable_save=_img_cfg.enable_save,
+                                enable_screenshot=_img_cfg.enable_screenshot,
+                                enable_ocr=_img_cfg.enable_ocr,
+                                screenshot_dir=_img_cfg.screenshot_dir,
+                            )
+                            if _img_tools:
+                                all_tools.extend(_img_tools)
+                        except Exception as exc:
+                            logger.warning("[Session %s] Image tools failed: %s", self.session_id, exc)
 
                 # ── Audio tools ───────────────────────────────────────────
                 try:

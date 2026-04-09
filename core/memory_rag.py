@@ -12,6 +12,7 @@ import json
 import logging
 import queue
 import threading
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +98,7 @@ class SyncRagMCPClient:
         strictly ordered — one finishes completely before the next starts.
         """
         if not self._session:
+            logger.error("[Memory:rag] MCP session not initialized — cannot call '%s'", name)
             return "ERROR: MCP session not initialized."
 
         with self._call_lock:
@@ -111,8 +113,13 @@ class SyncRagMCPClient:
                 logger.error("[Memory:rag] Tool call '%s' timed out after 60s", name)
                 return "ERROR: timeout"
             except Exception as e:
-                logger.error("[Memory:rag] Tool call '%s' failed: %s", name, e)
-                return f"ERROR: {e}"
+                exc_type = type(e).__name__
+                exc_msg = str(e) or "(no message)"
+                logger.error(
+                    "[Memory:rag] Tool call '%s' failed: [%s] %s\n%s",
+                    name, exc_type, exc_msg, traceback.format_exc(),
+                )
+                return f"ERROR: [{exc_type}] {exc_msg}"
 
 
 
@@ -187,17 +194,19 @@ class RagMemoryBackend(MemoryBackend):
         
         # Helper to search and append
         def _search_append(col: str, title: str, k: int, m_filter: dict | None = None):
-            logger.debug(f"[DEBUG RAG] Searching '{col}' with query '{query}' and metadata_filter={m_filter}")
+            logger.debug("[Memory:rag] Searching '%s' (k=%d, filter=%s)", col, k, m_filter)
             if not col: return
             args = {"query": query, "collection": col, "top_k": k}
             if m_filter:
                 args["metadata_filter"] = m_filter
                 
             res = self._mcp.call_tool_sync("rag_search", args)
-            if "No results" not in res and "ERROR" not in res:
+            if res.startswith("ERROR"):
+                logger.warning("[Memory:rag] Search '%s' in '%s' returned: %s", query[:50], col, res)
+            elif "No results" not in res:
                 combined.append(f"=== {title} ===\n{res}")
             else:
-                logger.debug(f"[DEBUG RAG] {title} suppressed: {res}")
+                logger.debug("[Memory:rag] %s: no results for '%s'", title, query[:50])
 
         if category == "facts":
             _search_append(self._col_facts, "GLOBAL FACTS", top_k, m_filter={"is_global": "true"})
