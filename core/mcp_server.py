@@ -34,6 +34,7 @@ Usage
 
 from __future__ import annotations
 
+import datetime
 import asyncio
 import json
 import logging
@@ -592,6 +593,10 @@ class AgentSession:
     def _build_system_prompt(self) -> str:
         """Build the system prompt, including multi-agent identity instructions."""
         base = self.config.agent.system_prompt
+
+        # add current date and time
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        base += f"\nCurrent Date and Time: {current_time}\n"
 
         # If there are participants, add multi-agent awareness
         if self.participants:

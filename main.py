@@ -377,6 +377,10 @@ async def interactive_loop(
 
         # ── Persistent conversation history (survives across turns) ───────────
         sys_prompt = config.agent.system_prompt 
+        # __ Add Current Date and Time to the system prompt
+        import datetime
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sys_prompt += f"\n\nCurrent Date and Time: {current_time}\n"
         conversation_history: list = []
         
         session_manager = None
