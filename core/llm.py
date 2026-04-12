@@ -39,7 +39,7 @@ def get_llm(model_cfg: Any):
             from langchain_core.rate_limiters import InMemoryRateLimiter
 
             # Rate limiter for aviod nvidia api rate limit
-            rate_limiter = InMemoryRateLimiter(requests_per_second=0.01)
+            rate_limiter = InMemoryRateLimiter(requests_per_second=0.1)
             kwargs = dict(
                 model=model_cfg.model_name,
                 temperature=model_cfg.temperature,
