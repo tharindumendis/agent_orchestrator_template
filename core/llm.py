@@ -39,12 +39,12 @@ def get_llm(model_cfg: Any):
             from langchain_core.rate_limiters import InMemoryRateLimiter
 
             # Rate limiter for aviod nvidia api rate limit
-            rate_limiter = InMemoryRateLimiter(requests_per_second=0.1)
+            # rate_limiter = InMemoryRateLimiter(requests_per_second=0.1)
             kwargs = dict(
                 model=model_cfg.model_name,
                 temperature=model_cfg.temperature,
                 api_key=model_cfg.api_key,
-                rate_limiter=rate_limiter,
+                # rate_limiter=rate_limiter,
             )
             if model_cfg.base_url and model_cfg.base_url != "http://localhost:11434":
                 kwargs["base_url"] = model_cfg.base_url
