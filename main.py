@@ -247,6 +247,7 @@ async def interactive_loop(
                     _stack,
                     transport=mc.transport,
                     url=mc.url,
+                    headers=mc.headers or None,
                     command=mc.command,
                     args=mc.args,
                     env=mc.env or None
@@ -350,6 +351,31 @@ async def interactive_loop(
         except Exception as _aud_exc:
             print(f"  {_c(RED, '[!]')} Audio tools failed to load: {_aud_exc}")
 
+        # ----------------------------------------------------------------
+        # PHASE 2.8 — Skills (catalog + always-inject + load_skill tool)
+        # ----------------------------------------------------------------
+        _repl_skills = []     # all discovered skills (kept for slash-command lookup)
+        _skills_prompt = ""   # catalog block + always-inject content
+        try:
+            from core.skill_loader import (
+                discover_skills, build_catalog_block,
+                load_skill_content, make_load_skill_tool,
+            )
+            _sk_cfg = config.skills
+            if _sk_cfg.enabled:
+                _repl_skills = discover_skills(_sk_cfg.skills_dirs)
+                if _repl_skills:
+                    all_tools.append(make_load_skill_tool(_repl_skills))
+                    sk_names = [s.name for s in _repl_skills]
+                    print(f"  {_c(GREEN, '[+]')} Skills → {sk_names} (load_skill tool registered)")
+                    _skills_prompt = build_catalog_block(_repl_skills)
+                    for sname in _sk_cfg.always_inject:
+                        body = load_skill_content(sname, _repl_skills)
+                        print(f"  {_c(GREEN, '[+]')} Skill always-inject: {sname}")
+                        _skills_prompt += f"\n\n{body}"
+        except Exception as _sk_exc:
+            print(f"  {_c(RED, '[!]')} Skills failed to load: {_sk_exc}")
+
         # Build Orchestrator LLM
         from core.llm import get_llm
         try:
@@ -376,11 +402,14 @@ async def interactive_loop(
         # )
 
         # ── Persistent conversation history (survives across turns) ───────────
-        sys_prompt = config.agent.system_prompt 
+        sys_prompt = config.agent.system_prompt
         # __ Add Current Date and Time to the system prompt
         import datetime
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sys_prompt += f"\n\nCurrent Date and Time: {current_time}\n"
+        # __ Prepend skills catalog + always-inject content
+        if _skills_prompt:
+            sys_prompt = _skills_prompt + "\n\n" + sys_prompt
         conversation_history: list = []
         
         session_manager = None
@@ -661,6 +690,22 @@ async def interactive_loop(
                                         logger.warning(f"Failed to auto-fetch RAG context: {e}")
 
                                 # Append the (potentially enriched) new user message to running history
+                                # --- /skillname slash-command injection ---
+                                if (
+                                    _repl_skills
+                                    and config.skills.enabled
+                                    and config.skills.prompt_skill_trigger
+                                ):
+                                    try:
+                                        from core.skill_loader import extract_slash_commands, load_skill_content
+                                        task_text, _triggered = extract_slash_commands(task_text, _repl_skills)
+                                        for _sk in _triggered:
+                                            _full = load_skill_content(_sk.name, _repl_skills)
+                                            task_text = f"[Skill Loaded: {_sk.name}]\n{_full}\n\n" + task_text
+                                            print(f"  {_c(GREEN, '[+]')} Skill loaded: {_sk.name}")
+                                    except Exception as _ske:
+                                        logger.warning("[Skills] Slash-command error: %s", _ske)
+
                                 conversation_history.append(HumanMessage(content=task_text))
 
                                 # Print the RAG output + User Task

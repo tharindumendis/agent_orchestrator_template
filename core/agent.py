@@ -216,6 +216,9 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
                 try:
                     tools = await load_mcp_server_tools(
                         stack,
+                        transport=client_cfg.transport,
+                        url=client_cfg.url,
+                        headers=client_cfg.headers or None,
                         command=client_cfg.command,
                         args=client_cfg.args,
                         env=client_cfg.env or None,
@@ -310,6 +313,36 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
                 logger.warning("[AUDIO] Audio tools failed to load: %s", _aud_exc)
 
             # ----------------------------------------------------------------
+            # PHASE 2.8 — Skills (catalog + always-inject + load_skill tool)
+            # ----------------------------------------------------------------
+            _skills_catalog_block = ""
+            _skills_always_block  = ""
+            try:
+                from core.skill_loader import (
+                    discover_skills, build_catalog_block,
+                    load_skill_content, make_load_skill_tool,
+                )
+                _sk_cfg = config.skills
+                if _sk_cfg.enabled:
+                    _all_skills = discover_skills(_sk_cfg.skills_dirs)
+                    if _all_skills:
+                        # Register load_skill tool
+                        all_tools.append(make_load_skill_tool(_all_skills))
+                        logger.info(
+                            "[Skills] Registered load_skill | available: %s",
+                            [s.name for s in _all_skills],
+                        )
+                        # Build compact catalog for system prompt
+                        _skills_catalog_block = build_catalog_block(_all_skills)
+                        # Build always-inject full content
+                        for sname in _sk_cfg.always_inject:
+                            body = load_skill_content(sname, _all_skills)
+                            logger.info("[Skills] Always-injecting full skill: %s", sname)
+                            _skills_always_block += f"\n\n{body}"
+            except Exception as _sk_exc:
+                logger.warning("[Skills] Failed to load skills: %s", _sk_exc)
+
+            # ----------------------------------------------------------------
             # PHASE 3 — Build orchestrator LLM + ReAct agent
             # ----------------------------------------------------------------
             tool_descriptions = "\n".join(
@@ -323,6 +356,12 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
             enriched_prompt = base_prompt + (
                 f"\n\nAvailable tools:\n{tool_descriptions}" if tool_descriptions else ""
             )
+            # Prepend skills catalog (compact: name + description)
+            if _skills_catalog_block:
+                enriched_prompt = _skills_catalog_block + "\n\n" + enriched_prompt
+            # Append always-inject skills (full content)
+            if _skills_always_block:
+                enriched_prompt += _skills_always_block
 
             try:
                 from core.llm import get_llm

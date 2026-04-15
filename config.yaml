@@ -48,12 +48,12 @@ model:
 # to them automatically, then uses their execute_task tool to delegate work.
 # =============================================================================
 worker_agents:
-  - name: "GithubAgent"
-    description: "Github specialist worker agent."
-    command: "uvx"
-    args: [worker-agent]
-    env:
-      WORKER_AGENT_CONFIG: "./service_config/workers/agent_github_config.yaml"
+  # - name: "GithubAgent"
+  #   description: "Github specialist worker agent."
+  #   command: "uvx"
+  #   args: [worker-agent]
+  #   env:
+  #     WORKER_AGENT_CONFIG: "./service_config/workers/agent_github_config.yaml"
 
   # - name: "CommunicationAgent"
   #   description: "Communication specialist worker agent."
@@ -115,7 +115,12 @@ mcp_clients:
   # Filesystem server — exposes file read/write operations as MCP tools
   - name: "filesystem"
     command: "npx.cmd"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "../../"]
+    args:
+      [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:/DEV/mcp/universai/orchestra/Agent_head/sandbox",
+      ]
 
   # Telegram MCP — via published npm package (recommended)
   # - name: "telegram"
@@ -131,9 +136,16 @@ mcp_clients:
   #   env:
   #     BRAVE_API_KEY: "BSA-JagNVVuTNnmtJbjcIb0n-3WfVSI"
 
-  # - name: "shell-execution"
-  #   command: "npx.cmd"
-  #   args: ["-y", "mcp-shell"]
+  - name: "shell-execution"
+    command: "npx.cmd"
+    args: ["-y", "shell-command-mcp"]
+    env:
+      ALLOWED_COMMANDS: "*"
+
+  - name: duckduckgo-browser
+    command: uvx
+    args:
+      - duckduckgo-mcp-server
 
   # - name: "puppeteer"
   #   command: "npx.cmd"
@@ -164,12 +176,12 @@ memory:
   auto_feed_category: "all" # "all", "history", or "facts" (for task-based bots)
 
   # Configure this if backend is set to "rag"
-rag_server:
-  command: "uvx"
-  args: ["agent-rag-mcp"]
-  collection: "docs"
-  env:
-    RAG_CONFIG: "./service_config/rag_config.yaml"
+  rag_server:
+    command: "uvx"
+    args: ["agent-rag-mcp"]
+    collection: "docs"
+    env:
+      RAG_CONFIG: "./service_config/rag_config.yaml"
 
 # =============================================================================
 # Chat History Interface (Session persistence)
@@ -206,25 +218,25 @@ summarizer:
 # read_image is always available when enabled=true.
 # =============================================================================
 image_tools:
-  enabled: true              # master switch — set false to disable all image tools
-  enable_save: true          # save_image: download/copy images to disk
-  enable_screenshot: true    # screenshot: capture desktop screenshots (requires 'mss')
-  enable_ocr: true           # extract_text: OCR text extraction (requires 'pytesseract' + Tesseract)
-  screenshot_dir: "./screenshots"  # directory to auto-save screenshots
+  enabled: true # master switch — set false to disable all image tools
+  enable_save: true # save_image: download/copy images to disk
+  enable_screenshot: true # screenshot: capture desktop screenshots (requires 'mss')
+  enable_ocr: true # extract_text: OCR text extraction (requires 'pytesseract' + Tesseract)
+  screenshot_dir: "./screenshots" # directory to auto-save screenshots
 
 # =============================================================================
 # Audio Tools
 # Built-in tools for transcription (STT), text-to-speech (TTS), save, and record.
 # =============================================================================
 audio_tools:
-  enabled: true                # master switch — set false to disable all audio tools
-  enable_transcribe: true      # transcribe_audio: speech-to-text (requires SpeechRecognition + pydub + ffmpeg)
-  enable_tts: true             # text_to_speech: generate audio from text (requires gTTS)
-  enable_save: true            # save_audio: download/copy audio files
-  enable_record: true          # record_audio: record from microphone (requires sounddevice + scipy)
-  enable_play: true            # play_audio: play audio through speakers
-  enable_speak: true           # speak: TTS + immediate playback (agent voice)
-  audio_dir: "./audio"         # directory for auto-saved audio files
+  enabled: true # master switch — set false to disable all audio tools
+  enable_transcribe: true # transcribe_audio: speech-to-text (requires SpeechRecognition + pydub + ffmpeg)
+  enable_tts: true # text_to_speech: generate audio from text (requires gTTS)
+  enable_save: true # save_audio: download/copy audio files
+  enable_record: true # record_audio: record from microphone (requires sounddevice + scipy)
+  enable_play: true # play_audio: play audio through speakers
+  enable_speak: true # speak: TTS + immediate playback (agent voice)
+  audio_dir: "./audio" # directory for auto-saved audio files
 
 # =============================================================================
 # MCP Server Mode
@@ -233,11 +245,34 @@ audio_tools:
 # (Claude Desktop, Cursor, other Agent_head instances) can connect to.
 # =============================================================================
 mcp_server:
-  name: "agent-orchestrator"     # MCP server identity name
-  host: "127.0.0.1"             # bind host for SSE/HTTP transports
-  port: 8000                    # bind port for SSE/HTTP transports
-  log_dir: "./logs/mcp"         # directory for MCP server + job logs
-  default_progress: "summary"   # progress streaming level: "none" | "summary" | "full"
-                                # none    — only return final answer
-                                # summary — stream tool call names + success/failure
-                                # full    — stream everything (tool args, results, LLM text)
+  name: "agent-orchestrator" # MCP server identity name
+  host: "127.0.0.1" # bind host for SSE/HTTP transports
+  port: 8000 # bind port for SSE/HTTP transports
+  log_dir: "./logs/mcp" # directory for MCP server + job logs
+  default_progress:
+    "summary" # progress streaming level: "none" | "summary" | "full"
+    # none    — only return final answer
+    # summary — stream tool call names + success/failure
+    # full    — stream everything (tool args, results, LLM text)
+
+# =============================================================================
+# Skills
+# Read-only knowledge documents that teach the agent how to do specific tasks.
+# Auto-discovered by scanning all directories listed in skills_dirs.
+#
+# How it works:
+#   - A compact catalog (name + description) is always injected into the system prompt.
+#   - The agent calls the `load_skill` tool to fetch full content when needed.
+#   - If prompt_skill_trigger is true, typing /skillname in a prompt auto-loads it.
+#   - always_inject lists skills whose FULL content is loaded at every startup.
+#
+# Adding a new skill: create skills/<name>/SKILL.md — no code changes needed.
+# =============================================================================
+skills:
+  enabled: true
+  skills_dirs:
+    - "./skills" # built-in skills folder
+    - ".agents/skills"
+    # - "/path/to/shared/company-skills"    # add more dirs here
+  always_inject: [] # e.g. ["mysql"] to always load fully
+  prompt_skill_trigger: true # set false for API/MCP bot deployments

@@ -126,6 +126,7 @@ class AgentSession:
                         tools = await load_mcp_server_tools(
                             self._stack,
                             transport=mc.transport, url=mc.url,
+                            headers=mc.headers or None,
                             command=mc.command, args=mc.args, env=mc.env or None,
                         )
                         all_tools.extend(tools)
@@ -204,6 +205,30 @@ class AgentSession:
                 except Exception as exc:
                     logger.warning("[Session %s] Audio tools failed: %s", self.session_id, exc)
 
+                # ── Skills (catalog + always-inject + load_skill tool) ─────────────────
+                self._skills_prompt = ""
+                self._session_skills = []
+                try:
+                    from core.skill_loader import (
+                        discover_skills, build_catalog_block,
+                        load_skill_content, make_load_skill_tool,
+                    )
+                    _sk_cfg = self.config.skills
+                    if _sk_cfg.enabled:
+                        self._session_skills = discover_skills(_sk_cfg.skills_dirs)
+                        if self._session_skills:
+                            all_tools.append(make_load_skill_tool(self._session_skills))
+                            logger.info(
+                                "[Session %s] Skills: %s",
+                                self.session_id, [s.name for s in self._session_skills],
+                            )
+                            self._skills_prompt = build_catalog_block(self._session_skills)
+                            for sname in _sk_cfg.always_inject:
+                                body = load_skill_content(sname, self._session_skills)
+                                self._skills_prompt += f"\n\n{body}"
+                except Exception as exc:
+                    logger.warning("[Session %s] Skills failed: %s", self.session_id, exc)
+
                 # ── Build graph ────────────────────────────────────────────────────
                 llm = get_llm(self.config.model)
                 tool_node = ToolNode(all_tools, handle_tool_errors=True)
@@ -233,7 +258,12 @@ class AgentSession:
                             logger.info("[Session %s] Resumed: %d messages", self.session_id, len(history))
 
                 if not self.conversation_history:
-                    self.conversation_history = [SystemMessage(content=self.config.agent.system_prompt)]
+                    # Prepend skills catalog + always-inject if available
+                    _sp = self.config.agent.system_prompt
+                    _skills_p = getattr(self, "_skills_prompt", "")
+                    if _skills_p:
+                        _sp = _skills_p + "\n\n" + _sp
+                    self.conversation_history = [SystemMessage(content=_sp)]
 
                 self._ready = True
                 self._boot_complete.set()
@@ -259,8 +289,25 @@ class AgentSession:
         Serialises concurrent calls with a lock.
         """
         async with self._lock:
-            # Auto-inject RAG context
+            # ── /skillname slash-command injection ──────────────────────────────
             task_text = user_message
+            _session_skills = getattr(self, "_session_skills", [])
+            if (
+                _session_skills
+                and self.config.skills.enabled
+                and self.config.skills.prompt_skill_trigger
+            ):
+                try:
+                    from core.skill_loader import extract_slash_commands, load_skill_content
+                    task_text, _triggered = extract_slash_commands(task_text, _session_skills)
+                    for _sk in _triggered:
+                        _full = load_skill_content(_sk.name, _session_skills)
+                        task_text = f"[Skill Loaded: {_sk.name}]\n{_full}\n\n" + task_text
+                        logger.info("[Session %s] Skill triggered: %s", self.session_id, _sk.name)
+                except Exception as _ske:
+                    logger.warning("[Session %s] Skill slash-cmd error: %s", self.session_id, _ske)
+
+            # Auto-inject RAG context
             if self.config.memory.enabled and self.backend and self.config.memory.auto_feed_top_k > 0:
                 try:
                     ctx = self.backend.search(

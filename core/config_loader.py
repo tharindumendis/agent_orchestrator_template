@@ -177,13 +177,15 @@ class MCPClientConfig:
     """
     A direct MCP tool server (not a worker agent) the orchestrator connects to.
 
-    transport: "stdio" (default) or "sse"
-    url:       Required when transport="sse" (e.g. "http://127.0.0.1:6010/sse")
+    transport: "stdio" (default) or "sse" or "http"
+    url:       Required when transport="sse" or "http"
+    headers:   Optional HTTP headers (e.g. Authorization) for sse/http transports.
     command/args: Used only for stdio transport.
     """
     name: str
-    transport: str = "stdio"          # "stdio" | "sse"
-    url: str | None = None            # SSE endpoint URL (transport=sse only)
+    transport: str = "stdio"          # "stdio" | "sse" | "http"
+    url: str | None = None            # SSE/HTTP endpoint URL
+    headers: dict = field(default_factory=dict)  # HTTP headers (sse/http only)
     command: str = ""                 # stdio binary (transport=stdio only)
     args: list[str] = field(default_factory=list)
     env: dict = field(default_factory=dict)
@@ -292,6 +294,32 @@ class MCPServerConfig:
 
 
 @dataclass
+class SkillsConfig:
+    """
+    Skills are read-only knowledge documents that teach the agent HOW to do
+    specific tasks.  They are auto-discovered from one or more directories.
+
+    skills_dirs:          List of directories to scan. Each dir may contain
+                          multiple skill sub-folders (each with a SKILL.md).
+                          All dirs are merged; duplicate skill names are skipped
+                          (first-found wins).
+
+    always_inject:        Skill names whose FULL content is embedded in the
+                          system prompt at startup, unconditionally.
+                          (e.g. ["mysql"] if every task involves MySQL)
+
+    prompt_skill_trigger: When True, /skillname tokens in user prompts
+                          automatically load that skill's full content.
+                          Set False for API/MCP deployments where prompts
+                          come from other agents rather than humans.
+    """
+    enabled: bool = True
+    skills_dirs: list[str] = field(default_factory=lambda: ["./skills"])
+    always_inject: list[str] = field(default_factory=list)
+    prompt_skill_trigger: bool = True
+
+
+@dataclass
 class AppConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -304,6 +332,7 @@ class AppConfig:
     image_tools: ImageToolsConfig = field(default_factory=ImageToolsConfig)
     audio_tools: AudioToolsConfig = field(default_factory=AudioToolsConfig)
     mcp_server: MCPServerConfig = field(default_factory=MCPServerConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +434,8 @@ def load_config(config_path: str | None = None) -> AppConfig:
             MCPClientConfig(
                 name=entry["name"],
                 transport=transport,
-                url=entry.get("url"),           # only for transport=sse
+                url=entry.get("url"),           # only for transport=sse/http
+                headers=entry.get("headers", {}),  # optional auth / custom headers
                 command=entry.get("command", ""),
                 args=entry.get("args", []),
                 env=entry.get("env", {}),
@@ -498,6 +528,15 @@ def load_config(config_path: str | None = None) -> AppConfig:
         log_dir=mcp_raw.get("log_dir", "./logs/mcp"),
     )
 
+    # --- Skills ---
+    sk_raw = raw.get("skills", {})
+    skills = SkillsConfig(
+        enabled=bool(sk_raw.get("enabled", True)),
+        skills_dirs=sk_raw.get("skills_dirs", ["./skills"]),
+        always_inject=sk_raw.get("always_inject", []),
+        prompt_skill_trigger=bool(sk_raw.get("prompt_skill_trigger", True)),
+    )
+
     return AppConfig(
         agent=agent,
         model=model,
@@ -510,4 +549,5 @@ def load_config(config_path: str | None = None) -> AppConfig:
         image_tools=image_tools,
         audio_tools=audio_tools,
         mcp_server=mcp_server,
+        skills=skills,
     )

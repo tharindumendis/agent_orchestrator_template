@@ -18,6 +18,7 @@ async def load_mcp_server_tools(
     # ── network transports (sse / http) ─────────────────────
     transport: str = "stdio",
     url: str | None = None,
+    headers: dict | None = None,
     # ── shared ──────────────────────────────────────────────
     description_override: str | None = None,
 ):
@@ -27,20 +28,27 @@ async def load_mcp_server_tools(
     transport="stdio"  → spawns a subprocess via command/args  (default)
     transport="sse"    → legacy SSE endpoint  (url ending in /sse)
     transport="http"   → modern Streamable HTTP endpoint  (url ending in /mcp)
+
+    headers: optional dict of HTTP headers passed to sse_client / streamablehttp_client
+             (e.g. {"Authorization": "Bearer <token>"}).  Ignored for stdio transport.
     """
     try:
         if transport == "sse":
             if not url:
                 raise ValueError("transport='sse' requires 'url' to be set.")
             logger.info("[MCP Loader] Connecting via SSE to %s", url)
-            read, write = await stack.enter_async_context(sse_client(url))
+            read, write = await stack.enter_async_context(
+                sse_client(url, headers=headers or {})
+            )
 
         elif transport == "http":
             if not url:
                 raise ValueError("transport='http' requires 'url' to be set.")
             logger.info("[MCP Loader] Connecting via Streamable HTTP to %s", url)
             # streamablehttp_client returns (read, write, _get_session_id)
-            read, write, _ = await stack.enter_async_context(streamablehttp_client(url))
+            read, write, _ = await stack.enter_async_context(
+                streamablehttp_client(url, headers=headers or {})
+            )
 
         else:
             # Default: stdio subprocess

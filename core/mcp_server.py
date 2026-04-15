@@ -198,8 +198,23 @@ class AgentSession:
                 else:
                     tagged_message = message
 
-                # ── Auto-inject RAG context ───────────────────────────────
+                # ── /skillname slash-command injection ────────────────────
                 task_text = tagged_message
+                _session_skills = getattr(self, "_session_skills", [])
+                if (
+                    _session_skills
+                    and self.config.skills.enabled
+                    and self.config.skills.prompt_skill_trigger
+                ):
+                    try:
+                        from core.skill_loader import extract_slash_commands, load_skill_content
+                        task_text, _triggered = extract_slash_commands(task_text, _session_skills)
+                        for _sk in _triggered:
+                            _full = load_skill_content(_sk.name, _session_skills)
+                            task_text = f"[Skill Loaded: {_sk.name}]\n{_full}\n\n" + task_text
+                            logger.info("[Session %s] Skill triggered: %s", self.session_id, _sk.name)
+                    except Exception as _ske:
+                        logger.warning("[Session %s] Skill slash-command error: %s", self.session_id, _ske)
                 if (self.config.memory.enabled
                         and self.backend
                         and self.config.memory.auto_feed_top_k > 0):
@@ -431,6 +446,7 @@ class AgentSession:
                             stack,
                             transport=mc.transport,
                             url=mc.url,
+                            headers=mc.headers or None,
                             command=mc.command,
                             args=mc.args,
                             env=mc.env or None,
@@ -529,6 +545,31 @@ class AgentSession:
                 except Exception as exc:
                     logger.warning("[Session %s] Audio tools failed: %s", self.session_id, exc)
 
+                # ── Skills (catalog + always-inject + load_skill tool) ────
+                self._skills_prompt = ""
+                self._session_skills = []
+                try:
+                    from core.skill_loader import (
+                        discover_skills, build_catalog_block,
+                        load_skill_content, make_load_skill_tool,
+                    )
+                    _sk_cfg = self.config.skills
+                    if _sk_cfg.enabled:
+                        self._session_skills = discover_skills(_sk_cfg.skills_dirs)
+                        if self._session_skills:
+                            all_tools.append(make_load_skill_tool(self._session_skills))
+                            logger.info(
+                                "[Session %s] Skills: %s",
+                                self.session_id, [s.name for s in self._session_skills],
+                            )
+                            self._skills_prompt = build_catalog_block(self._session_skills)
+                            for sname in _sk_cfg.always_inject:
+                                body = load_skill_content(sname, self._session_skills)
+                                logger.info("[Session %s] Always-inject skill: %s", self.session_id, sname)
+                                self._skills_prompt += f"\n\n{body}"
+                except Exception as exc:
+                    logger.warning("[Session %s] Skills failed: %s", self.session_id, exc)
+
                 # ── Build LLM + ReAct graph ───────────────────────────────
                 llm = get_llm(self.config.model)
                 tool_node = ToolNode(all_tools, handle_tool_errors=True)
@@ -591,12 +632,17 @@ class AgentSession:
             self._boot_complete.set()
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt, including multi-agent identity instructions."""
+        """Build the system prompt, including skills catalog and multi-agent identity."""
         base = self.config.agent.system_prompt
 
         # add current date and time
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         base += f"\nCurrent Date and Time: {current_time}\n"
+
+        # Prepend skills catalog + always-inject content
+        skills_prompt = getattr(self, "_skills_prompt", "")
+        if skills_prompt:
+            base = skills_prompt + "\n\n" + base
 
         # If there are participants, add multi-agent awareness
         if self.participants:
