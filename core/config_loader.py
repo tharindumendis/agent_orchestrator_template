@@ -11,11 +11,11 @@ Config resolution priority
 ---------------------------
 1. Explicit ``config_path`` argument
 2. ``ORCHESTRATOR_CONFIG`` environment variable
-3. OS user-config dir  (created from bundled default on first run)
-       Windows : %LOCALAPPDATA%\\agent_head\\config.yaml
-       macOS   : ~/Library/Application Support/agent_head/config.yaml
-       Linux   : $XDG_CONFIG_HOME/agent_head/config.yaml  (~/.config/…)
-4. <cwd>/config.yaml
+3. <cwd>/.agents/config.yaml  (project-local config, placed by --setup)
+4. OS user-config dir  (created from bundled default on first run)
+       Windows : %LOCALAPPDATA%\\agent_head\\.agents\\config.yaml
+       macOS   : ~/Library/Application Support/agent_head/.agents/config.yaml
+       Linux   : $XDG_CONFIG_HOME/agent_head/.agents/config.yaml  (~/.config/…)
 5. Bundled package default  (Agent_head/config.yaml next to main.py)
 """
 
@@ -62,9 +62,9 @@ def get_app_config_dir() -> Path:
     """
     Returns the OS-specific user-editable config directory for agent_head.
 
-    - Windows : %LOCALAPPDATA%\\agent_head
-    - macOS   : ~/Library/Application Support/agent_head
-    - Linux   : $XDG_CONFIG_HOME/agent_head  (default ~/.config/agent_head)
+    - Windows : %LOCALAPPDATA%\\agent_head\\.agents
+    - macOS   : ~/Library/Application Support/agent_head/.agents
+    - Linux   : $XDG_CONFIG_HOME/agent_head/.agents  (default ~/.config/agent_head/.agents)
     """
     if os.name == "nt":  # Windows
         base = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
@@ -73,7 +73,7 @@ def get_app_config_dir() -> Path:
     else:  # Linux / other POSIX
         base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
 
-    config_dir = base / "agent_head"
+    config_dir = base / "agent_head" / ".agents"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 
@@ -344,28 +344,28 @@ def load_config(config_path: str | None = None) -> AppConfig:
     """
     Load orchestrator config.  Resolution priority:
 
-    1. ``config_path``           — explicit path passed by the caller
-    2. ``ORCHESTRATOR_CONFIG``   — environment variable
-    3. OS user-config            — bootstrapped on first run from the bundled default
-       ``%LOCALAPPDATA%\\agent_head\\config.yaml``  (Windows)
-       ``~/Library/Application Support/agent_head/config.yaml``  (macOS)
-       ``~/.config/agent_head/config.yaml``  (Linux)
-    4. ``<cwd>/config.yaml``     — dev / monorepo convenience
+    1. ``config_path``               — explicit path passed by the caller
+    2. ``ORCHESTRATOR_CONFIG``       — environment variable
+    3. ``<cwd>/.agents/config.yaml``  — project-local config (placed by --setup)
+    4. OS user-config                — bootstrapped on first run from the bundled default
+       ``%LOCALAPPDATA%\\agent_head\\.agents\\config.yaml``  (Windows)
+       ``~/Library/Application Support/agent_head/.agents/config.yaml``  (macOS)
+       ``~/.config/agent_head/.agents/config.yaml``  (Linux)
     5. ``<package_root>/config.yaml``  — bundled package fallback
     """
     env_path = os.getenv("ORCHESTRATOR_CONFIG")
     user_config_path = bootstrap_config()
-    cwd_path = Path.cwd() / "config.yaml"
+    cwd_path = Path.cwd() / ".agents" / "config.yaml"
     package_root_path = _PACKAGE_DEFAULT_CONFIG
 
     if config_path:
         final_path = Path(config_path)
     elif env_path:
         final_path = Path(env_path)
-    elif user_config_path.exists():
-        final_path = user_config_path
     elif cwd_path.exists():
         final_path = cwd_path
+    elif user_config_path.exists():
+        final_path = user_config_path
     else:
         final_path = package_root_path
 
@@ -374,10 +374,10 @@ def load_config(config_path: str | None = None) -> AppConfig:
             f"Orchestrator config not found. Checked:\n"
             f"  1. Explicit path              : {config_path}\n"
             f"  2. Env var ORCHESTRATOR_CONFIG: {env_path}\n"
-            f"  3. OS user-config             : {user_config_path}\n"
-            f"  4. CWD                        : {cwd_path}\n"
+            f"  3. CWD .agents/config.yaml     : {cwd_path}\n"
+            f"  4. OS user-config             : {user_config_path}\n"
             f"  5. Package default            : {package_root_path}\n"
-            f"Please ensure a 'config.yaml' exists at one of the above locations."
+            f"Tip: run 'agent-head --setup' in your project directory to create .agents/config.yaml"
         )
 
     logger.info("[agent_head] Using config: %s", final_path.resolve())

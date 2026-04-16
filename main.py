@@ -22,6 +22,10 @@ Usage:
 
     # Change model at runtime:
     python main.py --model gemini-2.0-flash --provider gemini --api-key sk-...
+
+    # Export default config files to a directory for editing:
+    python main.py --setup
+    python main.py --setup /path/to/my/project
 """
 
 from __future__ import annotations
@@ -445,7 +449,7 @@ async def interactive_loop(
         if config.agent.debug:
             from pathlib import Path
             from datetime import datetime
-            log_dir = Path("logs/runs")
+            log_dir = Path(".agents/logs/runs")
             log_dir.mkdir(parents=True, exist_ok=True)
             # Use session_id if resumed, else generate a fresh timestamp
             sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -863,6 +867,8 @@ Examples:
   python main.py --config my_config.yaml
   python main.py --model gpt-4o --provider openai --api-key sk-...
   python main.py --model gemini-2.0-flash --provider gemini --api-key AIza...
+  python main.py --setup
+  python main.py --setup /path/to/my/project
         """,
     )
     p.add_argument("--task", "-t", type=str, default=None,
@@ -879,8 +885,9 @@ Examples:
                    help="API key override.")
     p.add_argument("--base-url", type=str, default=None,
                    help="Base URL override.")
-    p.add_argument("--edit", action="store_true", default=False,
-                   help="Copy the bundled config files to a location for editing.")
+    p.add_argument("--setup", nargs="?", const="", default=None, metavar="DIR",
+                   help="Copy the bundled config files to DIR for editing. "
+                        "Omit DIR to use the current working directory.")
     return p.parse_args()
 
 
@@ -889,11 +896,12 @@ Examples:
 # ---------------------------------------------------------------------------
 
 def _export_config(dest_dir: str) -> None:
-    """Copy the bundled config.yaml and service_config/ to *dest_dir*."""
+    """Copy the bundled config.yaml and service_config/ into <dest_dir>/.agents/."""
     import shutil
     from pathlib import Path
 
-    dest = Path(dest_dir).resolve()
+    # Always write into the hidden .agents subfolder
+    dest = (Path(dest_dir).resolve() / ".agents")
     pkg_root = Path(__file__).parent
     pkg_config = pkg_root / "config.yaml"
     pkg_service = pkg_root / "service_config"
@@ -903,45 +911,50 @@ def _export_config(dest_dir: str) -> None:
     # Copy config.yaml
     dest_config = dest / "config.yaml"
     if dest_config.exists():
-        overwrite = input(f"  config.yaml already exists at {dest_config}. Overwrite? [y/N] ").strip().lower()
+        overwrite = input(f"  .agents/config.yaml already exists at {dest_config}. Overwrite? [y/N] ").strip().lower()
         if overwrite != "y":
             print("  Skipped config.yaml")
         else:
             shutil.copy2(pkg_config, dest_config)
-            print(f"  ✓ Copied config.yaml → {dest_config}")
+            print(f"  \u2713 Copied config.yaml \u2192 {dest_config}")
     else:
         shutil.copy2(pkg_config, dest_config)
-        print(f"  ✓ Copied config.yaml → {dest_config}")
+        print(f"  \u2713 Copied config.yaml \u2192 {dest_config}")
 
     # Copy service_config/
     dest_service = dest / "service_config"
     if dest_service.exists():
-        overwrite = input(f"  service_config/ already exists at {dest_service}. Overwrite? [y/N] ").strip().lower()
+        overwrite = input(f"  .agents/service_config/ already exists at {dest_service}. Overwrite? [y/N] ").strip().lower()
         if overwrite != "y":
             print("  Skipped service_config/")
         else:
             shutil.copytree(pkg_service, dest_service, dirs_exist_ok=True)
-            print(f"  ✓ Copied service_config/ → {dest_service}")
+            print(f"  \u2713 Copied service_config/ \u2192 {dest_service}")
     else:
         shutil.copytree(pkg_service, dest_service)
-        print(f"  ✓ Copied service_config/ → {dest_service}")
+        print(f"  \u2713 Copied service_config/ \u2192 {dest_service}")
 
-    print(f"\n  Done! Edit your config at: {dest_config}")
-    print(f"  Then run: agent-head --config \"{dest_config}\"")
+    print(f"\n  Done! Config written to: {dest}")
+    print(f"  Run 'agent-head' from '{dest_dir}' and it will auto-load .agents/config.yaml")
 
 
 def _cli_entry() -> None:
     args = parse_args()
 
-    # --edit: export config files for editing and exit
-    if args.edit:
+    # --setup [DIR]: export config files for editing and exit
+    if args.setup is not None:
         print("\n" + "═" * 60)
-        print("  Agent_head — Export Config for Editing")
+        print("  Agent_head — Setup Config")
         print("═" * 60)
-        dest = input("\n  Enter destination directory: ").strip()
+        dest = args.setup.strip()
         if not dest:
-            print("  No path provided. Aborting.")
-            return
+            # No DIR given on CLI; prompt user, defaulting to CWD
+            dest = input(
+                f"\n  Enter destination directory [default: current dir '{os.getcwd()}']: "
+            ).strip()
+        if not dest:
+            dest = os.getcwd()
+            print(f"  Using current working directory: {dest}")
         _export_config(dest)
         return
 

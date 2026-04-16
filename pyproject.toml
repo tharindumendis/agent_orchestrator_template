@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 
 [project]
 name            = "agent-head"
-version         = "1.0.1"
+version         = "1.0.7"
 description     = "Main autonomous orchestrator agent that coordinates sub-worker agents via MCP."
 readme          = "README.md"
 license         = "MIT"
