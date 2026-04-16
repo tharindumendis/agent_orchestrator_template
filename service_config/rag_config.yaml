@@ -24,7 +24,7 @@ embeddings:
   #   ollama_model: "mxbai-embed-large"    # larger but more accurate
 
 store:
-  persist_dir: "./.agents/chroma_db" # Uncomment to specify a custom absolute or relative path for ChromaDB
+  persist_dir: "./rag_db" # Uncomment to specify a custom absolute or relative path for ChromaDB
   default_collection: "default" # collection used when none is specified
 
 chunking:
@@ -38,6 +38,6 @@ watch:
 
 logging:
   level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  file_path: "./.agents/logs/rag_server.log" # log file path (relative to config or absolute)
+  file_path: "./logs/rag_server.log" # log file path (relative to config or absolute)
   max_file_size: 10485760 # 10MB in bytes
   backup_count: 5 # number of backup files to keep
