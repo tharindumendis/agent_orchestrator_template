@@ -35,11 +35,19 @@ agent:
 
 # LLM that powers the orchestrator's reasoning
 model:
-  provider: "ollama" # Supported: "ollama", "openai", "gemini", "nvidia (moonshotai/kimi-k2.2 -sample)"
-  model_name: "qwen3-coder:480b-cloud"
+  # nvidia (moonshotai/kimi-k2.2 -sample)
+  # gemini (gemini-2.5-flash-lite)
+  # anthropic (claude-sonnet-4.5)
+  # bedrock (anthropic.claude-3-5-sonnet-20241022-v2:0)
+  provider: "ollama" # Supported: "ollama", "openai", "gemini", "anthropic", "bedrock", "nvidia (moonshotai/kimi-k2.2 -sample)"
+  model_name: "qwen3.5:397b-cloud"
   temperature: 0.0
   base_url: "http://localhost:11434"
-  # api_key: "" # Uncomment for openai / gemini
+  api_key: "" # Uncomment for openai / gemini
+  # bedrock
+  aws_access_key_id: ""
+  aws_secret_access_key: ""
+  aws_region: "us-east-1"
 
 # =============================================================================
 # Worker Agents
@@ -48,12 +56,12 @@ model:
 # to them automatically, then uses their execute_task tool to delegate work.
 # =============================================================================
 worker_agents:
-  # - name: "GithubAgent"
-  #   description: "Github specialist worker agent."
-  #   command: "uvx"
-  #   args: [worker-agent]
-  #   env:
-  #     WORKER_AGENT_CONFIG: "./service_config/workers/agent_github_config.yaml"
+  - name: "core-agent"
+    description: "core agent that can ask any question."
+    command: "agent-mcp"
+    args: []
+    env:
+      # WORKER_AGENT_CONFIG: "./service_config/workers/agent_github_config.yaml"
 
   # - name: "CommunicationAgent"
   #   description: "Communication specialist worker agent."
@@ -92,7 +100,7 @@ notify_server:
   args:
     - agent-notification-mcp
   env:
-    AGENT_NOTIFY_CONFIG: "./.agents/service_config/notify_config.yaml"
+    AGENT_NOTIFY_CONFIG: "./service_config/notify_config.yaml"
 
 # =============================================================================
 # Direct MCP Tool Servers
@@ -115,32 +123,38 @@ mcp_clients:
   # Filesystem server — exposes file read/write operations as MCP tools
   - name: "filesystem"
     command: "npx.cmd"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "./"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp/universai/orchestra"]
 
   # Telegram MCP — via published npm package (recommended)
   # - name: "telegram"
   #   command: "npx.cmd"
   #   args: ["-y", "@tharindumendis100/tgcli", "mcp", "--transport", "stdio"]
   #   env:
-  #     TELEGRAM_API_ID: "36365905"
-  #     TELEGRAM_API_HASH: "6afc6693a4f79866868d635769c3f959"
+  #     TELEGRAM_API_ID: "[ENCRYPTION_KEY]"
+  #     TELEGRAM_API_HASH: "[ENCRYPTION_KEY]"
 
   # - name: "brave-search"
   #   command: "npx.cmd"
   #   args: ["-y", "@modelcontextprotocol/server-brave-search"]
   #   env:
-  #     BRAVE_API_KEY: "BSA-JagNVVuTNnmtJbjcIb0n-3WfVSI"
+  #     BRAVE_API_KEY: "[ENCRYPTION_KEY]"
 
-  - name: "shell-execution"
-    command: "npx.cmd"
-    args: ["-y", "shell-command-mcp"]
-    env:
-      ALLOWED_COMMANDS: "*"
+  # - name: "shell-execution"
+  #   command: "npx.cmd"
+  #   args: ["-y", "shell-command-mcp"]
+  #   env:
+  #     ALLOWED_COMMANDS: "*"
 
-  - name: duckduckgo-browser
-    command: uvx
-    args:
-      - duckduckgo-mcp-server
+  # - name: duckduckgo-browser
+  #   command: uvx
+  #   args:
+  #     - duckduckgo-mcp-server
+
+
+  # - name: googelform
+  #   transport: http
+  #   url: https://link.mcpmarket.com/tharinduemendis/google-forms/mcp
+
 
   # - name: "puppeteer"
   #   command: "npx.cmd"
@@ -148,13 +162,13 @@ mcp_clients:
   #   env:
   #     PUPPETEER_EXECUTABLE_PATH: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
 
-  - name: tele_bot_mcp
-    transport: stdio
-    command: uvx
-    args:
-      - agent-telegram-mcp
-    env:
-      TELEGRAM_BOT_TOKEN: "your_bot_token" # Set your bot token here or use a .env file in the package dir
+  # - name: tele_bot_mcp
+  #   transport: stdio
+  #   command: uvx
+  #   args:
+  #     - agent-telegram-mcp
+  #   env:
+  #     TELEGRAM_BOT_TOKEN: "your_bot_token" # Set your bot token here or use a .env file in the package dir
 
 # =============================================================================
 # Long-Term Memory
@@ -176,7 +190,7 @@ memory:
     args: ["agent-rag-mcp"]
     collection: "docs"
     env:
-      RAG_CONFIG: "./.agents/service_config/rag_config.yaml"
+      RAG_CONFIG: "./service_config/rag_config.yaml"
 
 # =============================================================================
 # Chat History Interface (Session persistence)
@@ -202,7 +216,7 @@ summarizer:
   # If omitted, falls back to the main model settings above.
   model:
     provider: "ollama"
-    model_name: "qwen3-coder:480b-cloud" # change to a lighter model if available
+    model_name: "qwen3.5:397b-cloud" # change to a lighter model if available
     temperature: 0
     base_url: "http://localhost:11434"
     # api_key: ""

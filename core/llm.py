@@ -1,5 +1,7 @@
 import logging
 from typing import Any
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,52 @@ def get_llm(model_cfg: Any):
                 "langchain_nvidia_ai_endpoints required for nvidia provider. "
                 "Install with: pip install langchain-nvidia-ai-endpoints"
             ) from e
+    elif provider == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(
+                model=model_cfg.model_name,
+                temperature=model_cfg.temperature,
+                api_key=model_cfg.api_key,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "langchain_anthropic required for anthropic provider. "
+                "Install with: pip install langchain-anthropic"
+            ) from e
 
+    elif provider == "bedrock":
+        try:
+            from langchain_aws import ChatBedrockConverse
+
+            import os
+            region = model_cfg.aws_region
+            if not region:
+                raw = model_cfg.base_url or ""
+                is_url = raw.startswith("http") or "localhost" in raw or "127.0.0.1" in raw
+                region = "us-east-1" if (not raw or is_url) else raw
+
+            if model_cfg.aws_region:
+                os.environ["AWS_REGION"] = model_cfg.aws_region
+
+            if model_cfg.aws_access_key_id:
+                os.environ["AWS_ACCESS_KEY_ID"] = model_cfg.aws_access_key_id
+            
+            if model_cfg.aws_secret_access_key:
+                os.environ["AWS_SECRET_ACCESS_KEY"] = model_cfg.aws_secret_access_key
+
+            kwargs = dict(
+                model=model_cfg.model_name,
+                temperature=model_cfg.temperature,
+                region_name=region,
+            )
+
+            return ChatBedrockConverse(**kwargs)
+        except ImportError as e:
+            raise ImportError(
+                "langchain_aws required for bedrock provider. "
+                "Install with: pip install langchain-aws"
+            ) from e
     else:
         # Ollama: local vs cloud routing
         is_local = (

@@ -1,8 +1,11 @@
 memory/
-chroma_db/
+session_db/
 *.log
 sandbox/
 agents/
+*.db
+*.sqlite3
+skills/
 
 # Test scripts
 test_memory_rag.py
