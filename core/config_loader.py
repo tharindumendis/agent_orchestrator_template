@@ -242,6 +242,9 @@ class SummarizerModelConfig:
     temperature: float = 0.0
     base_url: str = "http://localhost:11434"
     api_key: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    aws_region: str | None = None
 
 
 @dataclass
@@ -482,6 +485,9 @@ def load_config(config_path: str | None = None) -> AppConfig:
             temperature=float(sum_model_raw.get("temperature", 0.0)),
             base_url=sum_model_raw.get("base_url", model.base_url),
             api_key=sum_model_raw.get("api_key", model.api_key),
+            aws_access_key_id=sum_model_raw.get("aws_access_key_id", model.aws_access_key_id),
+            aws_secret_access_key=sum_model_raw.get("aws_secret_access_key", model.aws_secret_access_key),
+            aws_region=sum_model_raw.get("aws_region", model.aws_region),
         ),
     )
 
