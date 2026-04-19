@@ -25,9 +25,12 @@ interface Message {
   isStreaming?: boolean;
 }
 
-const API_BASE = "http://localhost:8000";
-
 export default function Home() {
+  const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:8000");
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsUrlInput, setSettingsUrlInput] = useState("http://localhost:8000");
+  const [healthStatus, setHealthStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
+
   const [sessions, setSessions] = useState<string[]>([]);
   const [currentSession, setCurrentSession] = useState<string | null>(null);
   const [newSessionId, setNewSessionId] = useState("");
@@ -45,20 +48,47 @@ export default function Home() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Fetch sessions on mount
   useEffect(() => {
-    fetchSessions();
+    const savedUrl = localStorage.getItem("apiBaseUrl");
+    if (savedUrl) {
+      setApiBaseUrl(savedUrl);
+      setSettingsUrlInput(savedUrl);
+    }
   }, []);
 
-  // Scroll to bottom when messages change
+  // Fetch sessions on mount or when apiBaseUrl changes
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    fetchSessions();
+  }, [apiBaseUrl]);
+
+  const testConnection = async () => {
+    setHealthStatus("testing");
+    try {
+      const res = await fetch(`${settingsUrlInput}/health`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === "ok") {
+          setHealthStatus("success");
+          return;
+        }
+      }
+      setHealthStatus("error");
+    } catch {
+      setHealthStatus("error");
+    }
+  };
+
+  const saveSettings = () => {
+    setApiBaseUrl(settingsUrlInput);
+    localStorage.setItem("apiBaseUrl", settingsUrlInput);
+    setShowSettings(false);
+    setHealthStatus("idle");
+  };
 
   const fetchSessions = async () => {
     try {
       setIsLoadingSessions(true);
-      const res = await fetch(`${API_BASE}/sessions`);
+      const res = await fetch(`${apiBaseUrl}/sessions`);
       const data = await res.json();
       if (data.sessions) {
         setSessions(data.sessions);
@@ -75,7 +105,7 @@ export default function Home() {
     if (!newSessionId.trim() || isCreatingSession) return;
     try {
       setIsCreatingSession(true);
-      const res = await fetch(`${API_BASE}/sessions`, {
+      const res = await fetch(`${apiBaseUrl}/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: newSessionId.trim() }),
@@ -102,7 +132,7 @@ export default function Home() {
     if (deletingSessionId) return;
     try {
       setDeletingSessionId(sessionId);
-      await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
+      await fetch(`${apiBaseUrl}/sessions/${sessionId}`, { method: "DELETE" });
       if (currentSession === sessionId) {
         setCurrentSession(null);
         setMessages([]);
@@ -146,7 +176,7 @@ export default function Home() {
 
     try {
       const response = await fetch(
-        `${API_BASE}/sessions/${currentSession}/chat`,
+        `${apiBaseUrl}/sessions/${currentSession}/chat`,
         {
           method: "POST",
           headers: {
@@ -258,10 +288,19 @@ export default function Home() {
       {/* Sidebar - Pure black and white, sleek */}
       <div className="w-1/4 max-w-sm flex flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950">
         <div className="p-6 pb-2">
-          <h1 className="text-xl font-bold tracking-tight mb-1 flex items-center">
-            <span className="w-3 h-3 bg-blue-600 rounded-full inline-block mr-3"></span>
-            Agent Head
-          </h1>
+          <div className="flex justify-between items-center mb-1">
+            <h1 className="text-xl font-bold tracking-tight flex items-center">
+              <span className="w-3 h-3 bg-blue-600 rounded-full inline-block mr-3"></span>
+              Agent Head
+            </h1>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="p-2 text-neutral-400 hover:text-blue-600 hover:bg-neutral-100 dark:hover:bg-neutral-900 rounded-md transition-colors"
+              title="Settings"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
+          </div>
           <p className="text-sm text-neutral-500 mb-6">
             Autonomous Orchestrator
           </p>
@@ -629,6 +668,95 @@ export default function Home() {
           </>
         )}
       </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-neutral-900 rounded-xl max-w-md w-full p-6 shadow-2xl border border-neutral-200 dark:border-neutral-800">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-bold">Settings</h2>
+              <button
+                onClick={() => {
+                  setShowSettings(false);
+                  setSettingsUrlInput(apiBaseUrl);
+                  setHealthStatus("idle");
+                }}
+                className="text-neutral-400 hover:text-black dark:hover:text-white transition-colors"
+                title="Close"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                  Agent Head Base URL
+                </label>
+                <input
+                  type="text"
+                  value={settingsUrlInput}
+                  onChange={(e) => {
+                    setSettingsUrlInput(e.target.value);
+                    setHealthStatus("idle");
+                  }}
+                  className="w-full bg-transparent border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-600 focus:border-blue-600 transition-all"
+                />
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={testConnection}
+                  disabled={healthStatus === "testing" || !settingsUrlInput.trim()}
+                  className="px-4 py-2 text-sm bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 rounded-lg transition-colors flex items-center disabled:opacity-50"
+                  type="button"
+                >
+                  {healthStatus === "testing" ? (
+                    <>
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-neutral-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                      Testing...
+                    </>
+                  ) : "Test Connection"}
+                </button>
+                
+                {healthStatus === "success" && (
+                  <span className="text-green-600 dark:text-green-500 text-sm flex items-center">
+                    <svg className="w-4 h-4 mr-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    API Online
+                  </span>
+                )}
+                {healthStatus === "error" && (
+                  <span className="text-red-600 dark:text-red-500 text-sm flex items-center">
+                    <svg className="w-4 h-4 mr-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    Connection Failed
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-8 flex justify-end space-x-3">
+              <button
+                onClick={() => {
+                  setShowSettings(false);
+                  setSettingsUrlInput(apiBaseUrl);
+                  setHealthStatus("idle");
+                }}
+                className="px-4 py-2 text-sm text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveSettings}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                type="button"
+              >
+                Save Base URL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
