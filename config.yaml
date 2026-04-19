@@ -125,6 +125,10 @@ mcp_clients:
     command: "npx.cmd"
     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp/universai/orchestra"]
 
+  - name: "Run-Command"
+    command: "npx.cmd"
+    args: ["-y","shell-exec-mcp"]
+
   # Telegram MCP — via published npm package (recommended)
   # - name: "telegram"
   #   command: "npx.cmd"
