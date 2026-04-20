@@ -125,6 +125,10 @@ mcp_clients:
     command: "npx.cmd"
     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp/universai/orchestra"]
 
+  - name: "Run-Command"
+    command: "npx.cmd"
+    args: ["-y","shell-exec-mcp"]
+
   # Telegram MCP — via published npm package (recommended)
   # - name: "telegram"
   #   command: "npx.cmd"
@@ -208,8 +212,8 @@ chat_history:
 # =============================================================================
 summarizer:
   enabled: true
-  summarize_every_n_messages: 6 # compress older items exactly every N messages
-  keep_recent_messages: 4 # keep this many recent messages untouched for context
+  summarize_every_n_messages: 8 # compress older items exactly every N messages
+  keep_recent_messages: 8 # keep this many recent messages untouched for context
   save_to_memory: true # save facts and summaries to long-term memory
 
   # Can be a cheaper/faster model than the main orchestrator.

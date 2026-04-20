@@ -6,6 +6,8 @@ agents/
 *.db
 *.sqlite3
 skills/
+.agents/
+dist/
 
 # Test scripts
 test_memory_rag.py

@@ -168,6 +168,13 @@ async def run(
 
 
 def _print_banner(config) -> None:
+    try:
+        banner_path = os.path.join(os.path.dirname(__file__), 'banner.txt')
+        with open(banner_path, 'r', encoding='utf-8') as f:
+            print(_c(CYAN, f.read()))
+    except Exception:
+        pass
+
     print("\n" + "═" * 60)
     print(f"  {_c(BOLD, config.agent.name)}  v{config.agent.version}")
     print("═" * 60)
@@ -888,6 +895,8 @@ Examples:
     p.add_argument("--setup", nargs="?", const="", default=None, metavar="DIR",
                    help="Copy the bundled config files to DIR for editing. "
                         "Omit DIR to use the current working directory.")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Skip prompts and accept defaults (e.g. for --setup).")
     return p.parse_args()
 
 
@@ -895,7 +904,7 @@ Examples:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _export_config(dest_dir: str) -> None:
+def _export_config(dest_dir: str, yes_mode: bool = False) -> None:
     """Copy the bundled config.yaml and service_config/ into <dest_dir>/.agents/."""
     import shutil
     from pathlib import Path
@@ -911,7 +920,7 @@ def _export_config(dest_dir: str) -> None:
     # Copy config.yaml
     dest_config = dest / "config.yaml"
     if dest_config.exists():
-        overwrite = input(f"  .agents/config.yaml already exists at {dest_config}. Overwrite? [y/N] ").strip().lower()
+        overwrite = "y" if yes_mode else input(f"  .agents/config.yaml already exists at {dest_config}. Overwrite? [y/N] ").strip().lower()
         if overwrite != "y":
             print("  Skipped config.yaml")
         else:
@@ -924,7 +933,7 @@ def _export_config(dest_dir: str) -> None:
     # Copy service_config/
     dest_service = dest / "service_config"
     if dest_service.exists():
-        overwrite = input(f"  .agents/service_config/ already exists at {dest_service}. Overwrite? [y/N] ").strip().lower()
+        overwrite = "y" if yes_mode else input(f"  .agents/service_config/ already exists at {dest_service}. Overwrite? [y/N] ").strip().lower()
         if overwrite != "y":
             print("  Skipped service_config/")
         else:
@@ -948,14 +957,18 @@ def _cli_entry() -> None:
         print("═" * 60)
         dest = args.setup.strip()
         if not dest:
-            # No DIR given on CLI; prompt user, defaulting to CWD
-            dest = input(
-                f"\n  Enter destination directory [default: current dir '{os.getcwd()}']: "
-            ).strip()
+            if args.yes:
+                dest = os.getcwd()
+                print(f"  Using current working directory: {dest}")
+            else:
+                # No DIR given on CLI; prompt user, defaulting to CWD
+                dest = input(
+                    f"\n  Enter destination directory [default: current dir '{os.getcwd()}']: "
+                ).strip()
         if not dest:
             dest = os.getcwd()
             print(f"  Using current working directory: {dest}")
-        _export_config(dest)
+        _export_config(dest, yes_mode=args.yes)
         return
 
     common = dict(
