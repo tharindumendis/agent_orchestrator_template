@@ -30,3 +30,11 @@ class ConversationHistoryBackend(ABC):
         Returns a list of all active session IDs stored in this backend.
         """
         pass
+
+    @abstractmethod
+    def export_session(self, session_id: str) -> str | None:
+        """
+        Exports the session history as a raw JSON string for debugging or external use.
+        Returns None if the session is not found.
+        """
+        pass
