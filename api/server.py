@@ -425,6 +425,21 @@ async def _get_or_create_session(session_id: str) -> AgentSession:
         _sessions[session_id] = sess
     return _sessions[session_id]
 
+def _get_db_session_manager():
+    config = _get_config()
+    cfg = config.chat_history
+    if cfg.backend == "sqlite":
+        from core.history_sqlite import SqliteConversationHistory
+        from pathlib import Path
+        _db = Path(cfg.connection_string)
+        if not _db.is_absolute():
+            _mem_dir = Path(config.memory.memory_dir)
+            if not _mem_dir.is_absolute():
+                _mem_dir = Path(__file__).parent.parent / config.memory.memory_dir
+            _db = _mem_dir / cfg.connection_string
+        return SqliteConversationHistory(db_path=_db)
+    return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI app
@@ -463,6 +478,36 @@ async def health():
 @app.get("/sessions")
 async def list_sessions():
     return {"sessions": list(_sessions.keys())}
+
+
+@app.get("/history/sessions")
+async def list_history_sessions():
+    """Returns a list of all saved session IDs from the database backend."""
+    manager = _get_db_session_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="Chat history backend not configured or supported.")
+    try:
+        return {"sessions": manager.list_sessions()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/sessions/{session_id}/export")
+async def export_session_history(session_id: str):
+    """Exports the raw JSON array of the session conversation history."""
+    manager = _get_db_session_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="Chat history backend not configured or supported.")
+    try:
+        data = manager.export_session(session_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Session history not found.")
+        # data is a JSON string from DB, we parse and let FastAPI serialize it as application/json
+        return json.loads(data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/sessions", status_code=201)

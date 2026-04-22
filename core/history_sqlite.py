@@ -64,3 +64,11 @@ class SqliteConversationHistory(ConversationHistoryBackend):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT session_id FROM sessions ORDER BY updated_at DESC")
             return [row[0] for row in cursor.fetchall()]
+
+    def export_session(self, session_id: str) -> str | None:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT messages_json FROM sessions WHERE session_id = ?", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+        return None
