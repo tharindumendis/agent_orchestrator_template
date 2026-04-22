@@ -363,6 +363,10 @@ async def run_orchestrator(task: str, config: AppConfig, session_id: str | None 
             if _skills_always_block:
                 enriched_prompt += _skills_always_block
 
+            # Append current date/time so the LLM always has temporal awareness
+            import datetime as _dt
+            enriched_prompt += f"\n\nCurrent Date and Time: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+
             try:
                 from core.llm import get_llm
                 llm = get_llm(config.model)

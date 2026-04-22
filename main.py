@@ -198,6 +198,15 @@ async def interactive_loop(
     base_url_override: str | None = None,
     session_id: str | None = None,
 ) -> None:
+    # Session logic:
+    #   no --session flag  → default to "default" (always persist)
+    #   --session no       → ephemeral mode, no persistence
+    #   --session myname   → named persistent session
+    if not session_id:
+        session_id = "default"
+    elif session_id.strip().lower() == "no":
+        session_id = None   # disable persistence explicitly
+
     if config_path:
         os.environ["ORCHESTRATOR_CONFIG"] = config_path
     config = load_config(config_path)
@@ -422,7 +431,8 @@ async def interactive_loop(
         if _skills_prompt:
             sys_prompt = _skills_prompt + "\n\n" + sys_prompt
         conversation_history: list = []
-        
+        _archived_count: int = 0   # messages already written to session_archive
+
         session_manager = None
         if session_id:
             if config.chat_history.backend == "sqlite":
@@ -438,14 +448,21 @@ async def interactive_loop(
                 session_manager = SqliteConversationHistory(db_path=_db_path)
             else:
                 logger.warning("Unsupported chat_history backend: %s", config.chat_history.backend)
-            
+
             history = session_manager.load_session(session_id)
             if history:
                 conversation_history = history
                 print(f"  {_c(GREEN, '[+]')} Resumed Session: '{session_id}' ({len(history)} messages)")
-                
+                # Count already-archived messages so we don't re-archive them
+                _archived_count = session_manager.get_archive_count(session_id)
+
         if not conversation_history:
             conversation_history = [SystemMessage(content=sys_prompt)]
+        else:
+            # Resumed session: guarantee SystemMessage is always position-0.
+            # Summarisation may have trimmed the history that was stored.
+            if not isinstance(conversation_history[0], SystemMessage):
+                conversation_history.insert(0, SystemMessage(content=sys_prompt))
 
         current_summary: str = ""             # rolling narrative; updated each compression cycle
         known_global_facts: list[str] = []    # full reconciled global fact list
@@ -458,7 +475,8 @@ async def interactive_loop(
             from datetime import datetime
             log_dir = Path(".agents/logs/runs")
             log_dir.mkdir(parents=True, exist_ok=True)
-            # Use session_id if resumed, else generate a fresh timestamp
+            # session_id is always set (defaults to "default") — use it directly
+            # In ephemeral mode (--session no) fall back to a timestamp
             sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
             debug_log_path = log_dir / f"{sess_name}.log"
             with open(debug_log_path, "a", encoding="utf-8") as f:
@@ -771,7 +789,18 @@ async def interactive_loop(
                                 if last_event is not None:
                                     conversation_history = list(last_event["messages"])
 
-                                # Save the persistent session to SQLite if active
+                                # ── Archive new messages BEFORE any trimming ──────────────────────
+                                # Permanent record is written before summarisation can shrink
+                                # the working copy, so the full history is always preserved.
+                                if session_manager and session_id:
+                                    session_manager.append_to_archive(
+                                        session_id,
+                                        conversation_history,
+                                        already_archived_count=_archived_count,
+                                    )
+                                    _archived_count = len(conversation_history)
+
+                                # Save working-copy session to SQLite (always, even without summarisation)
                                 if session_manager and session_id:
                                     session_manager.save_session(session_id, conversation_history)
 
@@ -790,6 +819,7 @@ async def interactive_loop(
                                     known_private_facts = result.private_facts
 
                                     # Update the persistent session to SQLite with the newly trimmed history
+                                    # NOTE: archive is already up-to-date — only save working copy here
                                     if session_manager and session_id:
                                         session_manager.save_session(session_id, conversation_history)
 

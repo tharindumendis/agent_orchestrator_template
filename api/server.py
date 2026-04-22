@@ -83,6 +83,7 @@ class AgentSession:
         self.current_summary: str = ""
         self.known_global_facts: list[str] = []
         self.known_private_facts: list[str] = []
+        self._archived_count: int = 0   # messages already written to session_archive
         self._stack = None
         self._ready = False
         self._lock = asyncio.Lock()   # serialise concurrent chat calls
@@ -258,12 +259,30 @@ class AgentSession:
                             logger.info("[Session %s] Resumed: %d messages", self.session_id, len(history))
 
                 if not self.conversation_history:
-                    # Prepend skills catalog + always-inject if available
+                    # Build system prompt for brand-new sessions
                     _sp = self.config.agent.system_prompt
+                    import datetime as _dt
+                    _sp += f"\n\nCurrent Date and Time: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                     _skills_p = getattr(self, "_skills_prompt", "")
                     if _skills_p:
                         _sp = _skills_p + "\n\n" + _sp
                     self.conversation_history = [SystemMessage(content=_sp)]
+                else:
+                    # Resumed session: ensure SystemMessage is still the first message.
+                    # If summarisation had replaced an old SystemMessage, re-inject one.
+                    from langchain_core.messages import SystemMessage as _SM
+                    if not isinstance(self.conversation_history[0], _SM):
+                        _sp = self.config.agent.system_prompt
+                        import datetime as _dt
+                        _sp += f"\n\nCurrent Date and Time: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        _skills_p = getattr(self, "_skills_prompt", "")
+                        if _skills_p:
+                            _sp = _skills_p + "\n\n" + _sp
+                        self.conversation_history.insert(0, SystemMessage(content=_sp))
+
+                # Initialise archive count from DB so we don't re-archive old msgs on resume
+                if self.session_manager:
+                    self._archived_count = self.session_manager.get_archive_count(self.session_id)
 
                 self._ready = True
                 self._boot_complete.set()
@@ -365,7 +384,18 @@ class AgentSession:
             if last_event:
                 self.conversation_history = list(last_event["messages"])
 
-            # Persist session
+            # ── Archive new messages BEFORE any trimming ──────────────────
+            # This ensures the permanent record is never affected by
+            # summarisation.  We only write the delta since last archive call.
+            if self.session_manager:
+                self.session_manager.append_to_archive(
+                    self.session_id,
+                    self.conversation_history,
+                    already_archived_count=self._archived_count,
+                )
+                self._archived_count = len(self.conversation_history)
+
+            # Persist working-copy session
             if self.session_manager:
                 self.session_manager.save_session(self.session_id, self.conversation_history)
 
@@ -383,6 +413,7 @@ class AgentSession:
                     self.known_global_facts = result.global_facts
                     self.known_private_facts = result.private_facts
 
+                    # Save TRIMMED working copy — archive is already up-to-date above
                     if self.session_manager:
                         self.session_manager.save_session(self.session_id, self.conversation_history)
 
@@ -494,7 +525,7 @@ async def list_history_sessions():
 
 @app.get("/history/sessions/{session_id}/export")
 async def export_session_history(session_id: str):
-    """Exports the raw JSON array of the session conversation history."""
+    """Exports the working-copy (windowed) JSON array of the session conversation history."""
     manager = _get_db_session_manager()
     if not manager:
         raise HTTPException(status_code=501, detail="Chat history backend not configured or supported.")
@@ -502,7 +533,26 @@ async def export_session_history(session_id: str):
         data = manager.export_session(session_id)
         if data is None:
             raise HTTPException(status_code=404, detail="Session history not found.")
-        # data is a JSON string from DB, we parse and let FastAPI serialize it as application/json
+        return json.loads(data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/sessions/{session_id}/full-export")
+async def export_session_full_archive(session_id: str):
+    """
+    Exports the COMPLETE, unabridged session archive — every message ever sent,
+    never trimmed by summarisation.  Useful for debugging and conversation replay.
+    """
+    manager = _get_db_session_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="Chat history backend not configured or supported.")
+    try:
+        data = manager.export_full_archive(session_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Session archive not found.")
         return json.loads(data)
     except HTTPException:
         raise

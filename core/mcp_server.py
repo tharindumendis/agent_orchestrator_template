@@ -102,6 +102,7 @@ class AgentSession:
         self.current_summary: str = ""
         self.known_global_facts: list[str] = []
         self.known_private_facts: list[str] = []
+        self._archived_count: int = 0   # messages already written to session_archive
 
         self.participants: dict[str, SessionParticipant] = {}
         self.purpose: str = ""
@@ -329,7 +330,18 @@ class AgentSession:
                 if last_event is not None:
                     self.conversation_history = list(last_event["messages"])
 
-                # ── Persist session ───────────────────────────────────────
+                # ── Archive new messages BEFORE any trimming ──────────────
+                # Permanent record written before summarisation can shrink the
+                # working copy — full conversation is never lost.
+                if self.session_manager:
+                    self.session_manager.append_to_archive(
+                        self.session_id,
+                        self.conversation_history,
+                        already_archived_count=self._archived_count,
+                    )
+                    self._archived_count = len(self.conversation_history)
+
+                # ── Persist working-copy session ──────────────────────────
                 if self.session_manager:
                     self.session_manager.save_session(
                         self.session_id, self.conversation_history
@@ -350,6 +362,7 @@ class AgentSession:
                         self.known_global_facts = result.global_facts
                         self.known_private_facts = result.private_facts
 
+                        # Save TRIMMED working copy — archive is already up-to-date above
                         if self.session_manager:
                             self.session_manager.save_session(
                                 self.session_id, self.conversation_history
@@ -505,26 +518,28 @@ class AgentSession:
                             return backend.save_fact(fact)
 
                         all_tools.extend([memory_search, memory_save])
+                        self.backend = backend
                         logger.info("[Session %s] Memory tools loaded", self.session_id)
                     except Exception as _mem_exc:
                         logger.warning(
                             "[Session %s] Memory failed: %s", self.session_id, _mem_exc)
 
-                        # ── Image tools ───────────────────────────────────────────
-                        try:
-                            from core.image_tools import get_image_tools
-                            _img_cfg = self.config.image_tools
-                            _img_tools = get_image_tools(
-                                enabled=_img_cfg.enabled,
-                                enable_save=_img_cfg.enable_save,
-                                enable_screenshot=_img_cfg.enable_screenshot,
-                                enable_ocr=_img_cfg.enable_ocr,
-                                screenshot_dir=_img_cfg.screenshot_dir,
-                            )
-                            if _img_tools:
-                                all_tools.extend(_img_tools)
-                        except Exception as exc:
-                            logger.warning("[Session %s] Image tools failed: %s", self.session_id, exc)
+                # ── Image tools ───────────────────────────────────────────────
+                try:
+                    from core.image_tools import get_image_tools
+                    _img_cfg = self.config.image_tools
+                    _img_tools = get_image_tools(
+                        enabled=_img_cfg.enabled,
+                        enable_save=_img_cfg.enable_save,
+                        enable_screenshot=_img_cfg.enable_screenshot,
+                        enable_ocr=_img_cfg.enable_ocr,
+                        screenshot_dir=_img_cfg.screenshot_dir,
+                    )
+                    if _img_tools:
+                        all_tools.extend(_img_tools)
+                        logger.info("[Session %s] Image tools: %s", self.session_id, [t.name for t in _img_tools])
+                except Exception as exc:
+                    logger.warning("[Session %s] Image tools failed: %s", self.session_id, exc)
 
                 # ── Audio tools ───────────────────────────────────────────
                 try:
@@ -605,6 +620,8 @@ class AgentSession:
                                 "[Session %s] Resumed: %d messages",
                                 self.session_id, len(history),
                             )
+                            # Seed archive count so we don't re-archive old msgs on resume
+                            self._archived_count = self.session_manager.get_archive_count(self.session_id)
 
                 # ── System prompt ─────────────────────────────────────────
                 if not self.conversation_history:
@@ -613,6 +630,13 @@ class AgentSession:
                     self.conversation_history = [
                         SystemMessage(content=self._build_system_prompt())
                     ]
+                else:
+                    # Resumed session: always guarantee SystemMessage is position-0.
+                    # Summarisation trims old messages but must never remove the system prompt.
+                    if not isinstance(self.conversation_history[0], SystemMessage):
+                        self.conversation_history.insert(
+                            0, SystemMessage(content=self._build_system_prompt())
+                        )
 
                 self._ready = True
                 self._boot_complete.set()
@@ -635,8 +659,8 @@ class AgentSession:
         """Build the system prompt, including skills catalog and multi-agent identity."""
         base = self.config.agent.system_prompt
 
-        # add current date and time
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # add current date and time — use datetime.datetime to avoid NameError
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         base += f"\nCurrent Date and Time: {current_time}\n"
 
         # Prepend skills catalog + always-inject content

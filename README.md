@@ -13,10 +13,11 @@ Agent_head acts as the "brain" of your agent orchestra:
 - **MCP Server Mode**: Expose the orchestrator as an MCP server for other agents/clients
 - **Agent Networking**: Connect multiple Agent_head instances together with shared sessions
 - **MCP Integration**: Connects to any MCP-compatible tool servers
+- **Persistent Session History**: Full conversation archive in SQLite — never lost, even after summarisation
 - **Memory & Context**: Maintains conversation history, facts, and auto-injects relevant context
 - **Interactive & Batch Modes**: REPL interface or single-shot task execution
 - **Rich Logging**: Per-job structured logs for debugging and auditing
-- **API Server**: REST API for programmatic access
+- **API Server**: REST API with streaming SSE for programmatic access
 
 ## Architecture
 
@@ -28,17 +29,18 @@ Agent_head acts as the "brain" of your agent orchestra:
                           └──────┬───────┘
                                  │ (MCP)
 ┌────────────────────────────────▼────────────────────────────────┐
-│                        Agent_head                              │
+│                        Agent_head                               │
 │                    (Orchestrator + MCP Server)                  │
-│                                                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐ │
-│  │ LangGraph    │  │   Memory     │  │   MCP Server          │ │
-│  │ ReAct Agent  │  │   (RAG)      │  │   (8 tools exposed)   │ │
-│  └──────────────┘  └──────────────┘  └───────────────────────┘ │
-│                                                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐ │
-│  │ Summarizer   │  │  Sessions    │  │  Progress Streaming   │ │
-│  └──────────────┘  └──────────────┘  └───────────────────────┘ │
+│                                                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
+│  │ LangGraph    │  │   Memory     │  │   MCP Server          │  │
+│  │ ReAct Agent  │  │   (RAG)      │  │   (8 tools exposed)   │  │
+│  └──────────────┘  └──────────────┘  └───────────────────────┘  │
+│                                                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
+│  │ Summarizer   │  │  Sessions    │  │  Progress Streaming   │  │
+│  │ (windowed)   │  │  (SQLite)    │  │  (SSE / ctx.info)     │  │
+│  └──────────────┘  └──────────────┘  └───────────────────────┘  │
 └────────────────────────────┬───────────────────────────────────┘
                              │
               ┌──────────────┼──────────────┐
@@ -62,32 +64,39 @@ Agent_head acts as the "brain" of your agent orchestra:
 
 ### Key Components
 
-- **main.py**: Entry point with CLI and interactive REPL
-- **core/agent.py**: LangGraph ReAct agent implementation
-- **core/mcp_server.py**: MCP server mode (exposes orchestrator as 8 MCP tools)
-- **core/config_loader.py**: Typed configuration loading
-- **core/mcp_loader.py**: MCP client/server connection management
-- **core/memory.py**: Long-term memory with RAG (SQLite + ChromaDB)
-- **core/conversation_summarizer.py**: Rolling conversation compression
-- **core/session_manager.py**: Persistent chat sessions
-- **api/server.py**: FastAPI REST server for external access
-- **config.yaml**: Main configuration file
+| File | Purpose |
+|------|---------|
+| `main.py` | CLI entry point — REPL, single-shot, session management |
+| `api/server.py` | FastAPI REST + SSE server |
+| `core/mcp_server.py` | MCP server mode (8 tools exposed) |
+| `core/config_loader.py` | Typed configuration loading |
+| `core/mcp_loader.py` | MCP client/server connection management |
+| `core/memory.py` | Long-term memory backends |
+| `core/conversation_summarizer.py` | Rolling history compression (windowed) |
+| `core/history.py` | Abstract session history backend interface |
+| `core/history_sqlite.py` | SQLite session persistence (working copy + full archive) |
+| `core/llm.py` | LLM provider factory |
+| `core/image_tools.py` | Image read / save / screenshot / OCR |
+| `core/audio_tools.py` | Audio transcribe / TTS / record / play |
+| `core/job_logger.py` | Structured per-job logging |
+| `config.yaml` | Main configuration file |
 
 ## Features
 
-- **Multi-Modal LLM Support**: Ollama, OpenAI, Google Gemini, NVIDIA NIM
+- **Multi-Modal LLM Support**: Ollama, OpenAI, Google Gemini, Anthropic, AWS Bedrock, NVIDIA NIM
 - **Worker Agent Delegation**: Automatic task routing to specialists
 - **MCP Server Mode**: Expose the orchestrator as an MCP server with 8 tools
 - **Agent Networking**: Connect multiple agents — shared sessions, identity tagging, supervisor monitoring
 - **All MCP Transports**: stdio, SSE, and Streamable HTTP
 - **Configurable Progress Streaming**: None / Summary / Full verbosity per call
-- **Direct MCP Tools**: Filesystem, Git, web scraping, etc.
-- **Memory System**: Fact storage and semantic search
-- **Conversation Persistence**: Resume sessions across runs
-- **Auto-Context Injection**: Relevant memory fed to LLM
+- **Direct MCP Tools**: Filesystem, shell execution, web scraping, etc.
+- **Memory System**: Fact storage and semantic search (RAG / ChromaDB)
+- **Persistent Session History**: Two-layer SQLite storage — windowed working copy for the LLM, unabridged archive for debugging
+- **Auto-Context Injection**: Relevant memory auto-fed to LLM before each turn
+- **Rolling Summarisation**: Keeps the LLM context window bounded; full history still preserved in archive
 - **Image & Audio Tools**: Screenshot, OCR, TTS, transcription, recording
-- **Notification Listening**: Real-time tool change monitoring
-- **Structured Logging**: Job-specific logs with full traces
+- **Notification Listening**: Real-time tool-change monitoring via Agent_notify
+- **Structured Logging**: Per-job logs with full traces
 - **Graceful Error Handling**: Tool failures don't crash the agent
 
 ## Installation
@@ -96,8 +105,8 @@ Agent_head acts as the "brain" of your agent orchestra:
 
 - Python 3.10+
 - `uv` package manager (recommended) or `pip`
-- For Ollama: Running Ollama server with models
-- For OpenAI/Gemini: API keys
+- For Ollama: Running Ollama server with models pulled
+- For OpenAI / Gemini / Anthropic: API keys configured
 
 ### Quick Setup
 
@@ -129,7 +138,6 @@ pip install -e .
 ### Development Setup
 
 ```bash
-# Install dev dependencies
 uv sync --group dev
 # Or
 pip install -e ".[dev]"
@@ -137,7 +145,13 @@ pip install -e ".[dev]"
 
 ## Configuration
 
-The main configuration is in `config.yaml`. Copy `config.yaml` and modify as needed.
+Run the setup wizard to generate a config in the current directory:
+
+```bash
+agent-head --setup
+```
+
+This creates `.agents/config.yaml` which is auto-loaded on next run.  Edit it to configure models, workers, memory, etc.
 
 ### Agent Configuration
 
@@ -145,49 +159,46 @@ The main configuration is in `config.yaml`. Copy `config.yaml` and modify as nee
 agent:
   name: "OrchestratorAgent"
   version: "1.0.0"
+  debug: false         # true → writes full prompt/response logs to .agents/logs/runs/
   system_prompt: |
     You are a powerful autonomous orchestrator agent...
-    [Detailed system prompt]
   max_iterations: 50
-  debug: false # Enable debug logging
 ```
 
 ### Model Configuration
 
 ```yaml
 model:
-  provider: "ollama" # "ollama", "openai", "gemini"
-  model_name: "qwen3-coder:480b-cloud"
+  provider: "ollama"   # "ollama" | "openai" | "gemini" | "anthropic" | "bedrock" | "nvidia"
+  model_name: "qwen3:32b"
   temperature: 0.0
-  base_url: "http://localhost:11434" # For Ollama
-  api_key: null # Required for OpenAI/Gemini
+  base_url: "http://localhost:11434"   # Ollama only
+  api_key: ""                          # OpenAI / Gemini / Anthropic
 ```
 
 ### Worker Agents
 
-Configure sub-agents (Agent_a clones):
-
 ```yaml
 worker_agents:
-  - name: "agent_a"
-    description: "General-purpose worker with shell and file tools"
-    command: "python" # Or full path to executable
-    args: ["path/to/agent_a/main.py"]
-    env: # Optional environment variables
-      SOME_VAR: "value"
+  - name: "core-agent"
+    description: "General-purpose worker"
+    command: "agent-mcp"
+    args: []
+    env:
+      WORKER_AGENT_CONFIG: "./service_config/worker_config.yaml"
 ```
 
 ### Direct MCP Clients
 
-Connect MCP servers directly:
-
 ```yaml
 mcp_clients:
   - name: "filesystem"
-    transport: "stdio" # "stdio" or "sse"
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-    url: null # For SSE transport
+    command: "npx.cmd"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+
+  - name: "shell"
+    command: "npx.cmd"
+    args: ["-y", "shell-exec-mcp"]
 ```
 
 ### Memory Configuration
@@ -195,290 +206,317 @@ mcp_clients:
 ```yaml
 memory:
   enabled: true
-  backend: "rag" # "rag" or "sqlite"
-  memory_dir: "memory"
-  max_save_length: 10000
+  backend: "rag"           # "rag" (ChromaDB) or "jsonl"
+  memory_dir: "./memory"
+  max_save_length: 500
+  auto_feed_top_k: 3       # chunks injected before each turn
+  auto_feed_category: "all" # "all" | "history" | "facts"
+
   rag_server:
-    host: "localhost"
-    port: 8000
-  auto_feed_top_k: 5
-  auto_feed_category: "all" # "all", "history", "facts"
+    command: "uvx"
+    args: ["agent-rag-mcp"]
+    env:
+      RAG_CONFIG: "./service_config/rag_config.yaml"
 ```
 
-### Chat History
+### Chat History (Session Persistence)
 
 ```yaml
 chat_history:
-  backend: "sqlite" # "sqlite" only for now
-  connection_string: "chat_history.db"
+  backend: "sqlite"
+  connection_string: "./session_db/sessions.db"
 ```
+
+Two tables are maintained automatically:
+
+| Table | Contents | Trimmed? |
+|-------|----------|----------|
+| `sessions` | Working copy — windowed slice fed to LLM | Yes (after summarisation) |
+| `session_archive` | Full archive — every message ever sent | **Never** |
 
 ### Summarizer
 
 ```yaml
 summarizer:
   enabled: true
-  model: # Uses main model if not specified
+  summarize_every_n_messages: 8   # compress after this many new Human+AI messages
+  keep_recent_messages: 8         # keep this many raw messages for the LLM feed
+  save_to_memory: true            # persist extracted facts to long-term memory
+
+  model:                          # can be a lighter/cheaper model than the main LLM
     provider: "ollama"
-    model_name: "qwen3-coder:32b"
-  max_history_length: 100
-  compression_ratio: 0.5
-  save_to_memory: true
+    model_name: "qwen3:8b"
+    temperature: 0
 ```
 
-### Notification Server
-
-```yaml
-notify_server:
-  enabled: true
-  command: "python"
-  args: ["path/to/agent_notify/main.py"]
-  env: {}
-```
+> **Note**: Summarisation only shrinks the *working copy* fed to the LLM.  The full unabridged conversation is always preserved in the `session_archive` table and accessible via `GET /history/sessions/{id}/full-export`.
 
 ## Usage
 
 ### Interactive REPL
 
 ```bash
-python main.py
+agent-head
 ```
 
-Starts an interactive prompt where you can enter tasks. Type "quit" to exit.
+Starts an interactive prompt.  History is **always saved** — the session automatically resumes from where you left off.  Type `quit` or press Ctrl-C to exit.
+
+### Session Modes
+
+```bash
+# Default — uses the "default" session, fully persistent
+agent-head
+
+# Named session — useful for keeping separate project contexts
+agent-head --session my-project
+
+# Ephemeral — no persistence, history is lost on exit
+agent-head --session no
+```
+
+| Flag | Session ID | Persistence |
+|------|-----------|-------------|
+| *(none)* | `"default"` | ✅ Always saved |
+| `--session myname` | `"myname"` | ✅ Always saved |
+| `--session no` | *(none)* | ❌ Ephemeral, lost on exit |
 
 ### Single-Shot Task
 
 ```bash
-python main.py --task "Analyze the codebase and suggest improvements"
+agent-head --task "Analyse the codebase and suggest improvements"
+
+# With a named session for memory continuity
+agent-head --session myproject --task "Continue where we left off"
 ```
 
 ### Custom Configuration
 
 ```bash
-python main.py --config path/to/custom_config.yaml
+agent-head --config /path/to/custom_config.yaml
 ```
 
 ### Override Model at Runtime
 
 ```bash
 # OpenAI
-python main.py --provider openai --model gpt-4o --api-key sk-your-key
+agent-head --provider openai --model gpt-4o --api-key sk-your-key
 
 # Gemini
-python main.py --provider gemini --model gemini-2.0-flash --api-key AIza...
+agent-head --provider gemini --model gemini-2.5-flash --api-key AIza...
 
-# Ollama
-python main.py --provider ollama --model llama3.2:70b
+# Ollama (local)
+agent-head --provider ollama --model llama3.3:70b
 ```
 
-### Resume Session
+### Export Config for Editing
 
 ```bash
-python main.py --session my-session-id
+# Export to current directory (.agents/ subfolder)
+agent-head --setup
+
+# Export to a specific project directory
+agent-head --setup /path/to/my-project
 ```
 
 ### API Server
 
-Start the REST API server:
-
 ```bash
-python -m api.server
-# Or
-agent-api
+agent-api                          # http://0.0.0.0:8000
+agent-api --port 9001
+agent-api --config /path/to/config.yaml
 ```
 
-API endpoints:
+#### Endpoints
 
-- `POST /sessions` — Create or resume a session
-- `POST /sessions/{id}/chat` — Send a message (SSE stream)
-- `GET /sessions` — List sessions
-- `GET /health` — Health check
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Liveness check |
+| `GET` | `/sessions` | List live sessions |
+| `POST` | `/sessions` | Create / resume a session |
+| `GET` | `/sessions/{id}` | Session metadata |
+| `DELETE` | `/sessions/{id}` | Clear session |
+| `POST` | `/sessions/{id}/chat` | Send message → SSE stream |
+| `POST` | `/sessions/{id}/shutdown` | Tear down agent (keep history) |
+| `GET` | `/history/sessions` | List all saved session IDs |
+| `GET` | `/history/sessions/{id}/export` | Export working-copy history (JSON) |
+| `GET` | `/history/sessions/{id}/full-export` | Export **full archive** (JSON) — never trimmed |
+
+#### SSE Event Types
+
+```jsonc
+{"type": "tool_call",   "name": "...", "args": {...}}
+{"type": "tool_result", "name": "...", "content": "..."}
+{"type": "token",       "content": "..."}   // intermediate AI text
+{"type": "done",        "content": "..."}   // final answer
+{"type": "error",       "content": "..."}   // something went wrong
+```
 
 ### MCP Server Mode
 
-Run Agent_head as an MCP server so other agents or clients can connect to it:
+Run Agent_head as an MCP server so other agents, Claude Desktop, or Cursor can connect:
 
 ```bash
-# stdio transport (default — for Claude Desktop, Cursor, other agents)
+# stdio transport (default — Claude Desktop, Cursor, other agent_mcp instances)
 agent-mcp
 agent-mcp --config /path/to/config.yaml
 
-# SSE transport (for network agent-to-agent communication)
+# SSE transport (LAN / internet agent networks)
 agent-mcp --transport sse --port 9000 --host 0.0.0.0
 
-# Streamable HTTP (modern MCP standard)
+# Streamable HTTP (modern MCP standard, production use)
 agent-mcp --transport http --port 9000
 ```
 
-This exposes **8 MCP tools**:
+**8 MCP tools exposed:**
 
 | Tool | Description |
 |------|-------------|
-| `orchestrate_task` | One-shot task execution (fire-and-forget) |
+| `orchestrate_task` | One-shot task execution |
 | `create_session` | Create or join a persistent session with agent identity |
 | `chat` | Multi-turn conversation in a session |
 | `list_sessions` | List all active sessions |
 | `get_session_history` | Retrieve conversation history |
 | `list_agents` | List configured workers & tools |
 | `get_status` | Agent health + workload (for supervisors) |
-| `close_session` | Tear down a session |
+| `close_session` | Tear down a session and persist history |
 
-See [docs/mcp-server.md](docs/mcp-server.md) for full MCP server documentation.
+## Session History — How It Works
 
-## Examples
-
-### Basic Task
+Agent_head uses a **two-layer storage model** so you never lose conversation history:
 
 ```
->> Task: List all Python files in the project
-[Orchestrator] I'll help you find Python files...
-[Tool Call] run_terminal_command
-   command: find . -name "*.py" -type f
-[Tool Result] run_terminal_command
-   ./main.py
-   ./core/agent.py
-   ...
-[Final Answer] Found 15 Python files in the project.
+Every turn
+  │
+  ├─► append_to_archive()    ← PERMANENT — every message, never trimmed
+  │
+  ├─► save_session()         ← WORKING COPY — windowed slice for LLM input
+  │
+  └─► [if threshold hit] summarize()
+        │
+        └─► save_session(trimmed_history)   ← WORKING COPY shrinks
+            (archive stays untouched)
 ```
 
-### Multi-Agent Coordination
-
-```
->> Task: Create a new feature branch and implement user authentication
-[Orchestrator] This requires Git operations and code changes. I'll delegate to the code specialist.
-[Tool Call] execute_agent_code_task
-   instruction: Create feature branch 'auth-feature' and implement basic auth
-[Tool Result] execute_agent_code_task
-   Branch created and auth implemented.
-[Final Answer] Feature branch created with authentication implemented.
-```
-
-### Memory Usage
-
-The agent automatically remembers facts and past tasks:
-
-```
->> Task: What's the current project structure?
-[Orchestrator] Let me check what I know about the project...
-[~] Auto-injected 1200 chars of memory context.
-[Final Answer] Based on previous analysis, the project has...
-```
+On session resume:
+- LLM is fed the **working copy** (summary + recent N messages)
+- Full archive is available via `GET /history/sessions/{id}/full-export` for debugging
 
 ## Logs and Debugging
 
-### Job Logs
-
-Each task creates a log file in `logs/jobs/` with full execution trace:
-
-```
-logs/jobs/
-├── 2024-01-15_14-30-45_task123.log
-└── 2024-01-15_14-35-12_task124.log
-```
-
 ### Debug Mode
 
-Enable debug logging:
-
 ```yaml
+# config.yaml
 agent:
   debug: true
 ```
 
-Or set environment variable:
+When enabled, every prompt fed to the LLM is written to `.agents/logs/runs/<session_id>.log`.
 
-```bash
-export AGENT_HEAD_DEBUG=1
-python main.py
-```
+### Job Logs (MCP mode)
 
-### Session Logs
-
-For interactive sessions, logs are in `logs/runs/`:
+Each MCP task creates a structured log in the configured `log_dir`:
 
 ```
-logs/runs/
-└── 2024-01-15_14-30-45_session123.log
+logs/mcp/jobs/
+├── 2025-04-20_12-00-00_abc123.log
+└── 2025-04-20_12-05-30_def456.log
+```
+
+### Session Debug Log (REPL mode)
+
+```
+.agents/logs/runs/
+├── default.log          ← default session
+├── my-project.log       ← --session my-project
+└── 20250420_120530.log  ← ephemeral --session no
 ```
 
 ## Troubleshooting
 
-### Common Issues
+### Worker agents not connecting
 
-**Worker agents not connecting:**
-
-- Check paths in `config.yaml`
+- Check paths / commands in `config.yaml`
 - Ensure worker virtual environments are activated
-- Verify worker agents are running and listening
+- Verify the worker command is on PATH (e.g. `agent-mcp`)
 
-**MCP tools failing:**
+### MCP tools failing
 
-- Check MCP server installation: `npx @modelcontextprotocol/server-filesystem --help`
-- Verify transport settings (stdio vs sse)
+```bash
+npx @modelcontextprotocol/server-filesystem --help   # verify install
+```
 
-**Memory not working:**
+- Check transport settings (stdio vs SSE vs HTTP)
+- Look for port conflicts
 
-- Check ChromaDB installation
-- Verify `memory/` directory permissions
-- Ensure RAG server is running if using remote
+### Memory not working
 
-**Colors not displaying:**
+- Check ChromaDB installation: `pip show chromadb`
+- Verify `memory/` directory has write permissions
+- Ensure the RAG server command (`uvx agent-rag-mcp`) is installed
 
-- On Windows, ensure terminal supports ANSI (use Windows Terminal)
-- Colors are automatically disabled if not supported
+### History / archive not saving
+
+- Confirm `chat_history.backend: "sqlite"` in config
+- Check that `connection_string` path is writable
+- Verify you are NOT using `--session no` (ephemeral disables persistence)
 
 ### Performance Tuning
 
-- Reduce `max_iterations` for faster responses
-- Adjust `temperature` for more/less creativity
-- Use smaller models for local execution
-- Enable summarization to reduce context length
+- Lower `summarize_every_n_messages` to compress more aggressively
+- Set `keep_recent_messages: 4-6` for smaller context windows
+- Use a lighter model for the summarizer (separate `summarizer.model` config)
+- Reduce `max_iterations` for faster single-turn responses
+
+## Project Structure
+
+```
+Agent_head/
+├── main.py                         # CLI entry point (REPL + single-shot)
+├── api/
+│   └── server.py                   # FastAPI REST + SSE server
+├── core/
+│   ├── agent.py                    # LangGraph ReAct agent
+│   ├── mcp_server.py               # MCP server mode (8 tools)
+│   ├── config_loader.py            # Typed config loading
+│   ├── mcp_loader.py               # MCP client connections
+│   ├── llm.py                      # LLM provider factory
+│   ├── memory.py                   # Memory backends
+│   ├── memory_rag.py               # RAG memory (ChromaDB)
+│   ├── history.py                  # Abstract history backend
+│   ├── history_sqlite.py           # SQLite: working copy + full archive
+│   ├── conversation_summarizer.py  # Rolling history compression
+│   ├── image_tools.py              # Image read/save/screenshot/OCR
+│   ├── audio_tools.py              # Audio transcribe/TTS/record/play
+│   ├── skill_loader.py             # Skills discovery and injection
+│   └── job_logger.py               # Structured job logging
+├── skills/                         # Skills directory (SKILL.md files)
+├── docs/
+│   └── mcp-server.md               # MCP server documentation
+├── config.yaml                     # Default config
+├── pyproject.toml                  # Package config
+├── .agents/                        # Local project config (auto-created by --setup)
+│   ├── config.yaml
+│   ├── service_config/
+│   ├── logs/runs/                  # Per-session debug logs
+│   └── skills/                     # Project-local skills
+├── memory/                         # Long-term memory storage
+└── service_config/                 # Worker + service configs
+```
 
 ## Development
 
-### Project Structure
-
-```
-agent_orchestrator_template/
-├── main.py                    # CLI entry point (REPL + single-shot)
-├── api/
-│   └── server.py              # REST API server
-├── core/
-│   ├── agent.py               # LangGraph ReAct agent
-│   ├── mcp_server.py          # MCP server mode (8 tools)
-│   ├── config_loader.py       # Typed config loading
-│   ├── mcp_loader.py          # MCP client connections
-│   ├── llm.py                 # LLM provider factory
-│   ├── memory.py              # Memory backends
-│   ├── memory_rag.py          # RAG memory with ChromaDB
-│   ├── image_tools.py         # Image read/save/screenshot/OCR
-│   ├── audio_tools.py         # Audio transcribe/TTS/record/play
-│   ├── conversation_summarizer.py  # Rolling history compression
-│   ├── history_sqlite.py      # SQLite session persistence
-│   └── job_logger.py          # Structured job logging
-├── docs/
-│   └── mcp-server.md          # MCP server documentation
-├── config.yaml                # Default config
-├── sample_config.yaml         # Template for new deployments
-├── pyproject.toml             # Package config
-├── logs/                      # Runtime logs
-├── memory/                    # Memory storage
-└── service_config/            # Worker + service configs
-```
-
 ### Adding New Features
 
-1. **New Tools**: Add to `core/mcp_loader.py` or create custom tools
-2. **New Memory Backends**: Implement in `core/memory.py`
-3. **New Summarizers**: Extend `core/conversation_summarizer.py`
+- **New Tools**: Create a `@lc_tool` decorated function and add it to `all_tools` in `main.py` / `api/server.py` / `core/mcp_server.py`
+- **New LLM Providers**: Add a branch in `core/llm.py`'s `get_llm()` factory
+- **New Memory Backends**: Implement `ConversationHistoryBackend` in `core/history.py`
+- **New Skills**: Create `skills/<name>/SKILL.md` — auto-discovered, no code changes needed
 
 ### Testing
 
 ```bash
-# Run tests
 pytest
-
-# With coverage
 pytest --cov=core --cov-report=html
 ```
 
@@ -489,18 +527,22 @@ pytest --cov=core --cov-report=html
 3. Make changes with tests
 4. Submit a pull request
 
-### Code Style
-
-- Use `black` for formatting
-- Follow PEP 8
-- Add type hints
-- Write docstrings
+Code style: `black` formatting, PEP 8, type hints, docstrings.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License — see LICENSE file for details.
 
 ## Changelog
+
+### v1.2.0
+
+- **Full Session Archive**: Two-layer SQLite storage — `sessions` (windowed, LLM feed) + `session_archive` (append-only, never trimmed). Full history preserved even after summarisation.
+- **`GET /history/sessions/{id}/full-export`**: New API endpoint to retrieve the complete, unabridged session conversation.
+- **Default Session**: REPL now always persists — no `--session` flag defaults to `"default"` session. Use `--session no` for ephemeral (no persistence) mode.
+- **System Prompt Guarantee**: System prompt is always position-0 in conversation history on resume, even if summarisation had previously trimmed it.
+- **`mcp_server.py` Bug Fixes**: Fixed `datetime.now()` crash (was calling method on module, not class), fixed image tools loading inside `except` block (only loaded when memory failed), added archive support.
+- **Anthropic / Bedrock Support**: Added provider support in `core/llm.py`.
 
 ### v1.1.0
 
