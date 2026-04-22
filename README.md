@@ -1,12 +1,23 @@
 # Agent_head — Main Autonomous Orchestrator
 
-**Agent_head** is the central orchestrator agent for the `orchestra` multi-agent system. It coordinates multiple specialized **Worker Agents** (based on the Agent_a template) and direct MCP (Model Context Protocol) tool servers through a unified LangGraph ReAct loop. This enables complex, multi-step tasks that require coordination across different domains and tools.
+**Agent_head** is the central orchestrator agent for the `orchestra` multi-agent system. It coordinates multiple specialized **Worker Agents** and direct MCP (Model Context Protocol) tool servers through a unified LangGraph ReAct loop. This enables complex, multi-step tasks that require coordination across different domains and tools.
 
-Agent_head can also run as an **MCP server itself**, enabling you to build **agent networks** — multiple orchestrators connecting to each other, sharing sessions, and collaborating on tasks.
+Agent_head can also natively run as an **MCP server itself** or as a **REST API Backend**, enabling you to build expansive agent networks spanning multiple orchestrators collaborating on heavy computation tasks.
+
+---
+
+## 📚 Documentation
+
+Detailed system mechanics and configuration guides have been moved to dedicated documentation files:
+
+- **[capabilities and User Guide](documentation.md)**: Explore the different operational modes, details on Multi-Agent brains, native tooling details, and `config.yaml` breakdowns.
+- **[Technical Implementation](implementation.md)**: Deep dive into the internal component architecture (LangGraph loop, summarizers, loading systems).
+
+---
 
 ## What is Agent_head?
 
-Agent_head acts as the "brain" of your agent orchestra:
+Agent_head acts as the highly-agile "brain" of your software interface:
 
 - **Autonomous Execution**: Uses LangChain/LangGraph for reasoning and tool calling
 - **Multi-Agent Coordination**: Spawns and delegates tasks to specialized worker agents
@@ -108,11 +119,13 @@ Agent_head acts as the "brain" of your agent orchestra:
 - For Ollama: Running Ollama server with models pulled
 - For OpenAI / Gemini / Anthropic: API keys configured
 
-### Quick Setup
+### Setup using UV
 
 ```bash
 uv tool install --force git+https://github.com/tharindumendis/agent_orchestrator_template.git
 ```
+
+### Setup via Source
 
 ```bash
 # Clone the repo
@@ -122,11 +135,8 @@ cd agent_orchestrator_template
 # Create virtual environment
 uv venv .venv
 
-# Activate environment
-# Windows
+# Activate environment (Windows)
 .venv\Scripts\activate
-# Linux/macOS
-source .venv/bin/activate
 
 # Install dependencies
 uv sync
@@ -258,6 +268,7 @@ summarizer:
 ```bash
 agent-head
 ```
+This command seamlessly creates the `.agents` hidden folder in your working directory and instantiates `config.yaml` alongside specialized agent configs, keeping your agent logic tightly bound to your project environment.
 
 Starts an interactive prompt.  History is **always saved** — the session automatically resumes from where you left off.  Type `quit` or press Ctrl-C to exit.
 
@@ -280,8 +291,9 @@ agent-head --session no
 | `--session myname` | `"myname"` | ✅ Always saved |
 | `--session no` | *(none)* | ❌ Ephemeral, lost on exit |
 
-### Single-Shot Task
+### Running the Orchestrator
 
+**Command Line Mode (REPL):**
 ```bash
 agent-head --task "Analyse the codebase and suggest improvements"
 
@@ -289,14 +301,12 @@ agent-head --task "Analyse the codebase and suggest improvements"
 agent-head --session myproject --task "Continue where we left off"
 ```
 
-### Custom Configuration
-
+**Single-Shot Prompting:**
 ```bash
 agent-head --config /path/to/custom_config.yaml
 ```
 
-### Override Model at Runtime
-
+**MCP Provider Mode:**
 ```bash
 # OpenAI
 agent-head --provider openai --model gpt-4o --api-key sk-your-key
