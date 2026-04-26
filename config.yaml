@@ -123,7 +123,7 @@ mcp_clients:
   # Filesystem server — exposes file read/write operations as MCP tools
   - name: "filesystem"
     command: "npx.cmd"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/DEV/mcp/universai/orchestra"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "./"]
 
   - name: "Run-Command"
     command: "npx.cmd"
@@ -213,7 +213,7 @@ chat_history:
 summarizer:
   enabled: true
   summarize_every_n_messages: 8 # compress older items exactly every N messages
-  keep_recent_messages: 8 # keep this many recent messages untouched for context
+  keep_recent_messages: 6 # keep this many recent messages untouched for context
   save_to_memory: true # save facts and summaries to long-term memory
 
   # Can be a cheaper/faster model than the main orchestrator.

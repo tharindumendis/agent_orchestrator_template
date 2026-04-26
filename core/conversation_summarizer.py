@@ -154,13 +154,17 @@ DO NOT include generic session observations or agent behavior descriptions.
 
     def should_summarize(self, history: list) -> bool:
         """
-        Return True when the number of Human+AI messages meets the threshold.
-        We ensure it triggers deterministically by adding the 'keep' baseline,
-        meaning it waits for exactly `trigger` new messages before compressing again.
+        Return True when the total number of non-system messages meets the
+        threshold.  We count ALL non-system messages (Human, AI, Tool) because
+        that is exactly what to_keep slices — so the trigger and the slice stay
+        consistent even when multi-step tool calls inflate the message count.
+
+        Threshold = keep_recent + trigger + 1 (the injected summary AIMessage).
+        The +1 ensures we don't re-trigger immediately after a compression cycle.
         """
         count = sum(
             1 for m in history
-            if isinstance(m, (HumanMessage, AIMessage))
+            if not isinstance(m, SystemMessage)
         )
         # Baseline = kept raw messages + 1 (the injected summary message)
         baseline = self._keep + 1

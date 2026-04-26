@@ -60,6 +60,7 @@ export const AnalyticsArea: React.FC<AnalyticsAreaProps> = ({
   const [expandedMsg, setExpandedMsg] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -466,41 +467,275 @@ export const AnalyticsArea: React.FC<AnalyticsAreaProps> = ({
                   })()}
                 </div>
 
-                {/* Per-turn token chart */}
-                <div className="bg-white dark:bg-black rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 border-b border-neutral-200 dark:border-neutral-800">
-                    <h3 className="font-semibold text-neutral-800 dark:text-neutral-200 text-sm">Token Usage Per AI Turn</h3>
-                  </div>
-                  <div className="p-6 overflow-x-auto">
-                    <div className="flex items-end gap-2 min-w-max h-32">
-                      {data.messages
-                        .filter((m) => m.type === "ai")
-                        .map((msg, i) => {
-                          const kwu = msg.data?.additional_kwargs?.usage_metadata;
-                          const meta = msg.data?.response_metadata;
-                          const tok = kwu?.total_tokens ?? ((meta?.prompt_eval_count ?? 0) + (meta?.eval_count ?? 0));
-                          const maxTok = Math.max(...data.messages
-                            .filter((m) => m.type === "ai")
-                            .map((m) => {
-                              const k = m.data?.additional_kwargs?.usage_metadata;
-                              const me = m.data?.response_metadata;
-                              return k?.total_tokens ?? ((me?.prompt_eval_count ?? 0) + (me?.eval_count ?? 0));
-                            }), 1);
-                          const h = Math.round((tok / maxTok) * 100);
-                          return (
-                            <div key={i} className="flex flex-col items-center gap-1 group" title={`Turn ${i + 1}: ${tok.toLocaleString()} tokens`}>
-                              <span className="text-xs text-neutral-400 opacity-0 group-hover:opacity-100 transition-opacity">{tok > 0 ? tok.toLocaleString() : ""}</span>
-                              <div
-                                className="w-5 rounded-t bg-blue-400 dark:bg-blue-600 hover:bg-blue-500 transition-colors cursor-default"
-                                style={{ height: `${Math.max(h, tok > 0 ? 4 : 0)}%` }}
+                {/* Per-turn token line chart */}
+                {(() => {
+                  const aiMsgs = data.messages.filter((m) => m.type === "ai");
+                  if (aiMsgs.length === 0) return null;
+
+                  const points = aiMsgs.map((msg, i) => {
+                    const kwu = msg.data?.additional_kwargs?.usage_metadata;
+                    const meta = msg.data?.response_metadata;
+                    const inTok  = kwu?.input_tokens  ?? meta?.prompt_eval_count ?? 0;
+                    const outTok = kwu?.output_tokens ?? meta?.eval_count        ?? 0;
+                    const totTok = kwu?.total_tokens  ?? (inTok + outTok);
+                    return { turn: i + 1, inTok, outTok, totTok };
+                  });
+
+                  const W = Math.max(points.length * 56, 420);
+                  const H = 180;
+                  const PAD = { top: 16, right: 20, bottom: 36, left: 54 };
+                  const chartW = W - PAD.left - PAD.right;
+                  const chartH = H - PAD.top - PAD.bottom;
+                  const maxVal = Math.max(...points.map((p) => p.totTok), 1);
+
+                  // Y-axis grid ticks (4 levels)
+                  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => ({
+                    val: Math.round(maxVal * f),
+                    y: PAD.top + chartH * (1 - f),
+                  }));
+
+                  const xOf = (i: number) =>
+                    points.length === 1
+                      ? PAD.left + chartW / 2
+                      : PAD.left + (i / (points.length - 1)) * chartW;
+                  const yOf = (v: number) => PAD.top + chartH * (1 - v / maxVal);
+
+                  const polyline = (vals: number[], color: string, dash?: string) => {
+                    const d = vals
+                      .map((v, i) => `${xOf(i)},${yOf(v)}`)
+                      .join(" ");
+                    return (
+                      <polyline
+                        points={d}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth="2"
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        strokeDasharray={dash}
+                        opacity="0.85"
+                      />
+                    );
+                  };
+
+                  const fmtK = (v: number) =>
+                    v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${v}`;
+
+                  return (
+                    <div className="bg-white dark:bg-black rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-sm overflow-hidden">
+                      {/* Header */}
+                      <div className="px-6 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                          <h3 className="font-semibold text-neutral-800 dark:text-neutral-200 text-sm">Token Usage Per AI Turn</h3>
+                          <p className="text-xs text-neutral-400 mt-0.5">
+                            Input · Output · Total tokens across {points.length} AI response{points.length !== 1 ? "s" : ""}
+                          </p>
+                        </div>
+                        {/* Legend */}
+                        <div className="flex items-center gap-4 text-xs font-medium">
+                          {[
+                            { label: "Input",  color: "#3b82f6" },
+                            { label: "Output", color: "#22c55e" },
+                            { label: "Total",  color: "#a855f7", dash: "4 3" },
+                          ].map(({ label, color, dash }) => (
+                            <span key={label} className="flex items-center gap-1.5 text-neutral-600 dark:text-neutral-400">
+                              <svg width="22" height="10" viewBox="0 0 22 10">
+                                <line
+                                  x1="0" y1="5" x2="22" y2="5"
+                                  stroke={color} strokeWidth="2.5"
+                                  strokeDasharray={dash}
+                                  strokeLinecap="round"
+                                />
+                              </svg>
+                              {label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Chart */}
+                      <div className="p-4 overflow-x-auto">
+                        <svg
+                          width={W}
+                          height={H}
+                          style={{ display: "block", minWidth: W, overflow: "visible" }}
+                        >
+                          {/* Grid lines */}
+                          {yTicks.map(({ val, y }) => (
+                            <g key={val}>
+                              <line
+                                x1={PAD.left} y1={y} x2={W - PAD.right} y2={y}
+                                stroke="currentColor"
+                                strokeWidth="0.5"
+                                opacity="0.08"
+                                className="text-neutral-900 dark:text-neutral-100"
                               />
-                            </div>
+                              <text
+                                x={PAD.left - 6} y={y + 4}
+                                textAnchor="end"
+                                fontSize="9"
+                                className="fill-neutral-400"
+                                fill="currentColor"
+                                style={{ fill: "#9ca3af" }}
+                              >
+                                {fmtK(val)}
+                              </text>
+                            </g>
+                          ))}
+
+                          {/* X-axis turn labels */}
+                          {points.map((p, i) => (
+                            <text
+                              key={i}
+                              x={xOf(i)}
+                              y={H - PAD.bottom + 14}
+                              textAnchor="middle"
+                              fontSize="9"
+                              style={{ fill: "#9ca3af" }}
+                            >
+                              {p.turn}
+                            </text>
+                          ))}
+                          <text
+                            x={PAD.left + chartW / 2}
+                            y={H - 2}
+                            textAnchor="middle"
+                            fontSize="9"
+                            style={{ fill: "#9ca3af" }}
+                          >
+                            AI Turn
+                          </text>
+
+                          {/* Lines */}
+                          {polyline(points.map((p) => p.inTok),  "#3b82f6")}
+                          {polyline(points.map((p) => p.outTok), "#22c55e")}
+                          {polyline(points.map((p) => p.totTok), "#a855f7", "4 3")}
+
+                          {/* Shaded area under total */}
+                          <polygon
+                            points={[
+                              ...points.map((p, i) => `${xOf(i)},${yOf(p.totTok)}`),
+                              `${xOf(points.length - 1)},${PAD.top + chartH}`,
+                              `${xOf(0)},${PAD.top + chartH}`,
+                            ].join(" ")}
+                            fill="#a855f7"
+                            opacity="0.04"
+                          />
+
+                          {/* Invisible hover zones + data points */}
+                          {points.map((p, i) => (
+                            <g key={i}>
+                              {/* Hover zone */}
+                              <rect
+                                x={xOf(i) - 22}
+                                y={PAD.top}
+                                width={44}
+                                height={chartH}
+                                fill="transparent"
+                                onMouseEnter={() => setHoverIdx(i)}
+                                onMouseLeave={() => setHoverIdx(null)}
+                                style={{ cursor: "default" }}
+                              />
+
+                              {/* Dots — always visible when hovered, tiny otherwise */}
+                              {[
+                                { v: p.inTok,  c: "#3b82f6" },
+                                { v: p.outTok, c: "#22c55e" },
+                                { v: p.totTok, c: "#a855f7" },
+                              ].map(({ v, c }) =>
+                                v > 0 ? (
+                                  <circle
+                                    key={c}
+                                    cx={xOf(i)}
+                                    cy={yOf(v)}
+                                    r={hoverIdx === i ? 4 : 2.5}
+                                    fill={c}
+                                    stroke="white"
+                                    strokeWidth="1.5"
+                                    style={{ transition: "r 0.12s" }}
+                                  />
+                                ) : null
+                              )}
+
+                              {/* Tooltip */}
+                              {hoverIdx === i && (
+                                <g>
+                                  {/* Vertical rule */}
+                                  <line
+                                    x1={xOf(i)} y1={PAD.top}
+                                    x2={xOf(i)} y2={PAD.top + chartH}
+                                    stroke="#6b7280"
+                                    strokeWidth="1"
+                                    strokeDasharray="3 2"
+                                    opacity="0.5"
+                                  />
+                                  {/* Tooltip box */}
+                                  {(() => {
+                                    const bx = Math.min(xOf(i) + 8, W - PAD.right - 110);
+                                    const by = PAD.top + 4;
+                                    return (
+                                      <g>
+                                        <rect
+                                          x={bx} y={by}
+                                          width={106} height={62}
+                                          rx="6" ry="6"
+                                          fill="#1f2937"
+                                          opacity="0.92"
+                                        />
+                                        <text x={bx + 8} y={by + 14} fontSize="9.5" fill="#e5e7eb" fontWeight="600">
+                                          Turn {p.turn}
+                                        </text>
+                                        <circle cx={bx + 8} cy={by + 27} r="3.5" fill="#3b82f6" />
+                                        <text x={bx + 16} y={by + 31} fontSize="9" fill="#93c5fd">
+                                          In: {p.inTok.toLocaleString()}
+                                        </text>
+                                        <circle cx={bx + 8} cy={by + 42} r="3.5" fill="#22c55e" />
+                                        <text x={bx + 16} y={by + 46} fontSize="9" fill="#86efac">
+                                          Out: {p.outTok.toLocaleString()}
+                                        </text>
+                                        <circle cx={bx + 8} cy={by + 57} r="3.5" fill="#a855f7" />
+                                        <text x={bx + 16} y={by + 61} fontSize="9" fill="#d8b4fe">
+                                          Total: {p.totTok.toLocaleString()}
+                                        </text>
+                                      </g>
+                                    );
+                                  })()}
+                                </g>
+                              )}
+                            </g>
+                          ))}
+                        </svg>
+
+                        {/* Context-window insight */}
+                        {points.length > 1 && (() => {
+                          const first = points[0].inTok;
+                          const last  = points[points.length - 1].inTok;
+                          const delta = last - first;
+                          const pct   = first > 0 ? Math.round((delta / first) * 100) : 0;
+                          return (
+                            <p className="text-xs text-neutral-400 mt-3 text-center">
+                              Input tokens{" "}
+                              {delta > 0 ? (
+                                <span className="text-blue-500 font-medium">grew by {pct}%</span>
+                              ) : delta < 0 ? (
+                                <span className="text-green-500 font-medium">shrank by {Math.abs(pct)}%</span>
+                              ) : (
+                                <span className="text-neutral-500">stayed flat</span>
+                              )}{" "}
+                              from turn 1 → {points.length}
+                              {delta < 0 && (
+                                <span className="ml-1 text-green-500">— summarisation compressing context ✓</span>
+                              )}
+                              {delta > 0 && pct > 50 && (
+                                <span className="ml-1 text-amber-400">— context window growing quickly ⚠</span>
+                              )}
+                            </p>
                           );
-                        })}
+                        })()}
+                      </div>
                     </div>
-                    <p className="text-xs text-neutral-400 mt-2 text-center">Each bar = one AI turn. Hover for token count.</p>
-                  </div>
-                </div>
+                  );
+                })()}
               </div>
             )}
 

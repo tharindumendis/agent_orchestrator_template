@@ -303,7 +303,7 @@ async def interactive_loop(
                 def memory_search(query: str, category: Literal["all", "history", "facts"] = "all") -> str:
                     """
                     Search your long-term memory for past tasks and results related to *query*.
-                    Use category="history" for looking up past tool executions and workflows.
+                    Use category="history"  for looking up past tool executions and workflows.
                     Use category="facts" for looking up saved notes, preferences, or project details.
 
                     args:
@@ -409,10 +409,18 @@ async def interactive_loop(
         # agent as a ToolMessage instead of crashing the graph stream.
         tool_node = ToolNode(all_tools, handle_tool_errors=True)
 
+        # No checkpointer — we manage conversation_history ourselves.
+        # MemorySaver was previously used for aupdate_state()-based injection,
+        # but that approach has been replaced by the break-and-restart pattern
+        # in _run_agent_turn. Keeping MemorySaver caused a critical memory leak:
+        # LangGraph's add_messages reducer APPENDS each turn's messages to the
+        # checkpoint's accumulated state, so summarization had zero effect on
+        # the context actually seen by the graph.
         graph = create_react_agent(
             model=llm,
             tools=tool_node,
         )
+        _graph_config: dict = {}   # no thread_id needed without checkpointer
 
         # tool_desc = "\n".join(
         #     f"  - {t.name}: {getattr(t, 'description', '')}" for t in all_tools
@@ -489,6 +497,171 @@ async def interactive_loop(
             if config.summarizer.enabled
             else None
         )
+
+        # ── State for parallel agent execution ──────────────────────────────
+        _interrupt_queue: asyncio.Queue = asyncio.Queue()   # mid-run injection queue
+        _agent_running: bool = False
+        _current_runner: asyncio.Task | None = None
+
+        async def _run_agent_turn(label: str = "[Agent]") -> None:
+            """Run one agent turn as a background asyncio.Task.
+
+            When the user types a message mid-run, it lands in _interrupt_queue.
+            After each graph step we check the queue. If a message is waiting we:
+              1. Break out of the current astream() (saving partial state)
+              2. Append the new message to conversation_history
+              3. Immediately re-run astream() with the full updated history
+            All of this happens inside the SAME Task — _agent_running stays True,
+            the prompt stays live, and the agent sees complete context.
+            """
+            nonlocal conversation_history, current_summary, known_global_facts, \
+                     known_private_facts, _archived_count, _agent_running
+            _agent_running = True
+            try:
+                while True:   # outer loop: re-runs when an interrupt message arrives
+                    final_answer = ""
+                    last_event: dict | None = None
+                    _restart = False
+
+                    async for event in graph.astream(
+                        {"messages": conversation_history},
+                        _graph_config,
+                        stream_mode="values",
+                    ):
+                        _print_event(event)
+                        last_event = event
+                        _last_msg = event["messages"][-1]
+                        if hasattr(_last_msg, "content") and _last_msg.content:
+                            final_answer = _last_msg.content
+
+                        # ── Check for mid-run user / notification messages ─────────
+                        # IMPORTANT: Only break at "safe" points in the ReAct cycle.
+                        #
+                        # LangGraph's ReAct loop alternates:
+                        #   agent node  → AIMessage(tool_calls=[...])   ← UNSAFE to break here
+                        #   tools node  → ToolMessage(...)               ← SAFE to break here
+                        #   agent node  → AIMessage(content="answer")   ← SAFE (final response)
+                        #
+                        # Breaking after an AIMessage with pending tool_calls leaves an
+                        # unresolved tool call in history. LLM providers then raise
+                        # "missing tool result" on the very next astream() call.
+                        if not _interrupt_queue.empty():
+                            _last_step_msg = event["messages"][-1]
+
+                            # Determine whether we're at a clean boundary
+                            _has_pending_tool_calls = (
+                                isinstance(_last_step_msg, AIMessage)
+                                and bool(getattr(_last_step_msg, "tool_calls", None))
+                            )
+
+                            if _has_pending_tool_calls:
+                                # Not safe yet — the tools node hasn't run to produce
+                                # the matching ToolMessages. Let this step finish; we'll
+                                # check again on the next event (after the tool result).
+                                logger.debug(
+                                    "[Inject] Skipping unsafe breakpoint "
+                                    "(AIMessage with pending tool_calls). "
+                                    "Will retry after tool result."
+                                )
+                            else:
+                                # Safe: either a ToolMessage or a final AIMessage.
+                                # Capture state, append the interrupt, and restart.
+                                _inj_msg = _interrupt_queue.get_nowait()
+                                if last_event is not None:
+                                    conversation_history = list(last_event["messages"])
+                                conversation_history.append(HumanMessage(content=_inj_msg))
+                                print(
+                                    f"\n  {_c(YELLOW, '[~] Mid-run message received — applying to agent:')} "
+                                    f"{str(_inj_msg)[:100]}"
+                                )
+                                _restart = True
+                                break   # break out of astream(); outer while will re-run
+
+                    if _restart:
+                        # Drain any additional messages that arrived during the break
+                        while not _interrupt_queue.empty():
+                            _extra = _interrupt_queue.get_nowait()
+                            conversation_history.append(HumanMessage(content=_extra))
+                            print(f"  {_c(YELLOW, '[~]')} Additional message queued: {str(_extra)[:80]}")
+                        continue  # restart the outer while loop → new astream() call
+
+                    # ── Stream finished normally (no interrupt) ────────────────────
+                    if last_event is not None:
+                        conversation_history = list(last_event["messages"])
+                    break  # exit outer while loop
+
+
+                # ── Archive new messages before any trimming ───────────────────
+                if session_manager and session_id:
+                    session_manager.append_to_archive(
+                        session_id,
+                        conversation_history,
+                        already_archived_count=_archived_count,
+                    )
+                    _archived_count = len(conversation_history)
+
+                # ── Save working-copy session ──────────────────────────────────
+                if session_manager and session_id:
+                    session_manager.save_session(session_id, conversation_history)
+
+                # ── Rolling summarization ──────────────────────────────────────
+                if summarizer and summarizer.should_summarize(conversation_history):
+                    orig_len = len(conversation_history)
+                    result = await summarizer.summarize(
+                        history=conversation_history,
+                        prev_summary=current_summary,
+                        known_global_facts=known_global_facts,
+                        known_private_facts=known_private_facts,
+                    )
+                    conversation_history = result.trimmed_history
+                    current_summary = result.summary
+                    known_global_facts = result.global_facts
+                    known_private_facts = result.private_facts
+
+                    if session_manager and session_id:
+                        session_manager.save_session(session_id, conversation_history)
+
+                    if config.summarizer.save_to_memory and backend is not None:
+                        try:
+                            backend.save(
+                                job_id=f"summary_{int(time.time())}",
+                                task="Rolling Session Summary",
+                                summary=result.summary,
+                                session_id=session_id,
+                            )
+                            for _fact in result.new_global_facts:
+                                backend.save_fact(_fact, is_global=True)
+                            for _fact in result.new_private_facts:
+                                backend.save_fact(_fact, is_global=False, session_id=session_id)
+                        except Exception as _mem_exc:
+                            logger.warning("[Summarizer] Could not persist to memory: %s", _mem_exc)
+
+                    compressed = orig_len - len(conversation_history)
+                    new_facts_count = len(result.new_global_facts) + len(result.new_private_facts)
+                    total_facts_known = len(known_global_facts) + len(known_private_facts)
+                    print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
+                                   f"{new_facts_count} new/changed facts saved. "
+                                   f"Total facts known: {total_facts_known}."))
+
+                # ── Print final answer ─────────────────────────────────────────
+                print("\n" + "\u2500" * 60)
+                if isinstance(final_answer, list):
+                    final_answer = "\n".join(
+                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                        for b in final_answer
+                    )
+                print(f"\n{_c(BOLD, '[Final Answer]')}\n{final_answer}")
+                print("\u2500" * 60)
+
+            except asyncio.CancelledError:
+                pass
+            except Exception as _turn_exc:
+                print(ANSI(f"\n{_c(RED, '[ERROR]')} {_turn_exc}"))
+                logger.exception("%s turn failed", label)
+                if conversation_history and isinstance(conversation_history[-1], HumanMessage):
+                    conversation_history.pop()
+            finally:
+                _agent_running = False
 
         # ── Notification Listener (optional background task) ────────────────
         notification_queue: asyncio.Queue = asyncio.Queue()
@@ -630,59 +803,40 @@ async def interactive_loop(
                         except asyncio.CancelledError:
                             break
 
-                        # Extract your notification data
+                        # Extract notification data
                         change = notif.get("change", {})
                         server = notif.get("server", "?")
                         tool   = notif.get("tool", "?")
                         added  = change.get("added", [])
-                        label  = f"{server}/{tool}"
+                        _notif_label = f"{server}/{tool}"
 
-                        print(f"\n{_c(YELLOW, f'[🔔 Notification] {label} — {len(added)} new item(s)')}")
+                        print(f"\n{_c(YELLOW, f'[🔔 Notification] {_notif_label} — {len(added)} new item(s)')}")
 
                         if added:
                             import json as _j
                             auto_task = (
-                                f"[Auto-Task from {label}]\n"
+                                f"[Auto-Task from {_notif_label}]\n"
                                 f"New items detected via notification:\n"
                                 f"{_j.dumps(added, indent=2)}\n\n"
                                 f"Analyse and act on these new items appropriately."
                             )
-                            conversation_history.append(HumanMessage(content=auto_task))
                             print(f"{_c(BOLD, '[Auto-Task]')} {auto_task[:120]}...\n" + "─" * 60)
 
-                            # Run the Agent Graph!
-                            # (Because patch_stdout is active, this will cleanly print above the user's current prompt)
-                            final_answer = ""
-                            last_event = None
-                            async for event in graph.astream(
-                                {"messages": conversation_history}, stream_mode="values"
-                            ):
-                                _print_event(event)
-                                last_event = event
-                                last = event["messages"][-1]
-                                if hasattr(last, "content") and last.content:
-                                    final_answer = last.content
+                            if _agent_running:
+                                # ── Agent mid-run: inject into the live graph ─────────────────
+                                _interrupt_queue.put_nowait(auto_task)
+                                print(f"  {_c(YELLOW, '[~]')} Notification injected into running agent turn.")
+                            else:
+                                # ── No agent running: start a fresh turn ──────────────────────
+                                conversation_history.append(HumanMessage(content=auto_task))
+                                _current_runner = asyncio.create_task(_run_agent_turn("[Auto-Task]"))
 
-                            if last_event is not None:
-                                conversation_history = list(last_event["messages"])
-
-                            print(f"\n{_c(BOLD, '[Auto-Answer]')}\n{final_answer}\n" + "─" * 60)
-
-                        # 3. RE-ARM the notification task so we can catch the next one!
+                        # Re-arm the notification task
                         notif_task = asyncio.create_task(notification_queue.get())
                         pending_tasks.add(notif_task)
 
-                    # try:
-                    #     # Use asyncio.to_thread so the event loop stays free while
-                    #     # waiting for input — this lets the notification background
-                    #     # task run concurrently instead of being starved.
-                    #     task = (await asyncio.to_thread(
-                    #         input, f"\n{_c(BOLD, '>> Task:')} "
-                    #     )).strip()
-
                     if prompt_task in done:
                         try:
-                            # .result() will catch EOFError/KeyboardInterrupt if Ctrl+C is pressed
                             task_text = prompt_task.result().strip()
                         except (EOFError, KeyboardInterrupt):
                             print("\n\nExiting.")
@@ -693,198 +847,96 @@ async def interactive_loop(
                             break
 
                         if task_text:
+                            if _agent_running:
+                                # ── Agent mid-run: inject the message into the live graph ──────
+                                # aupdate_state writes the HumanMessage into checkpoint state;
+                                # the running astream loop picks it up on its very next step.
+                                _interrupt_queue.put_nowait(task_text)
+                                print(f"  {_c(YELLOW, '[~]')} Message injected into running agent turn.")
+                            else:
+                                # ── No agent running: start a fresh turn ──────────────────────
+                                try:
+                                    task_text_copy: str = task_text
 
-                            try:
-                                # --- Auto-Inject RAG Context ---
-                                if config.memory.enabled and config.memory.auto_feed_top_k > 0:
-                                    try:
-                                        # Grab the backend initialized earlier in PHASE 2.5
-                                        context_str = backend.search(
-                                            task_text, 
-                                            category=config.memory.auto_feed_category,
-                                            session_id=session_id
-                                        )
-                                        task_text_copy : str = task_text
-
-                                        # We do a basic split/truncate to avoid huge windows.
-                                        # For RAG, each backend might format differently, but a raw character limit is safe.
-                                        MAX_CONTEXT_CHARS = 4000
-                                        if len(context_str) > MAX_CONTEXT_CHARS:
-                                            context_str = context_str[:MAX_CONTEXT_CHARS] + "\n...[truncated]"
-
-                                        if context_str.strip() and "No relevant" not in context_str:
-                                            print(f"  {_c(GREY, '[~]')} Auto-injected {len(context_str)} chars of memory context.")
-                                            task_text = f"[System: Relevant Past Memory]\n{context_str}\n\n[User Task]\n{task_text}"
-                                    except Exception as e:
-                                        logger.warning(f"Failed to auto-fetch RAG context: {e}")
-
-                                # Append the (potentially enriched) new user message to running history
-                                # --- /skillname slash-command injection ---
-                                if (
-                                    _repl_skills
-                                    and config.skills.enabled
-                                    and config.skills.prompt_skill_trigger
-                                ):
-                                    try:
-                                        from core.skill_loader import extract_slash_commands, load_skill_content
-                                        task_text, _triggered = extract_slash_commands(task_text, _repl_skills)
-                                        for _sk in _triggered:
-                                            _full = load_skill_content(_sk.name, _repl_skills)
-                                            task_text = f"[Skill Loaded: {_sk.name}]\n{_full}\n\n" + task_text
-                                            print(f"  {_c(GREEN, '[+]')} Skill loaded: {_sk.name}")
-                                    except Exception as _ske:
-                                        logger.warning("[Skills] Slash-command error: %s", _ske)
-
-                                conversation_history.append(HumanMessage(content=task_text))
-
-                                # Print the RAG output + User Task
-                                # print(f"\n{_c(BOLD, '[Task]')} {task_text}\n" + "─" * 60)
-                                logger.debug(f"User Task with RAG context: {task_text}")
-
-                                # print the original user task
-                                print(f"\n{_c(BOLD, '[Task]')} {task_text_copy}\n" + "─" * 60)
-                                final_answer = ""
-
-                                # --- Write exact LLM prompt to debug log ---
-                                if debug_log_path:
-                                    try:
-                                        import json
-                                        from langchain_core.messages import messages_to_dict
-                                        with open(debug_log_path, "a", encoding="utf-8") as f:
-                                            f.write(f"\n--- [TURN] PROMPT FED TO LLM ---\n")
-                                            f.write(json.dumps(messages_to_dict(conversation_history), indent=2))
-                                            f.write("\n\n")
-                                    except Exception as e:
-                                        logger.error(f"Failed to write to debug log: {e}")
-
-                                # ── Debug Logger For Prompts  ──────────────────────────────────────────
-                                # debug_log_path = None
-                                # if config.agent.debug:
-                                #     from pathlib import Path
-                                #     from datetime import datetime
-                                #     log_prompt_dir = Path("logs/prompts")
-                                #     log_prompt_dir.mkdir(parents=True, exist_ok=True)
-                                #     # Use session_id if resumed, else generate a fresh timestamp
-                                #     sess_name = session_id if session_id else datetime.now().strftime("%Y%m%d_%H%M%S")
-                                #     debug_log_prompt_path = log_prompt_dir / f"{sess_name}.log"
-                                #     with open(debug_log_prompt_path, "a", encoding="utf-8") as f:
-                                #         f.write(f"=== full prompt: {conversation_history} ===\n\n")
-                                # ── Debug Logger For Prompts ───────────────────────────────────────────
-
-
-                                last_event: dict | None = None
-                                async for event in graph.astream({"messages": conversation_history}, stream_mode="values"):
-                                    _print_event(event)
-                                    last_event = event
-                                    last = event["messages"][-1]
-                                    if hasattr(last, "content") and last.content:
-                                        final_answer = last.content
-
-                                # ── Replace history with the FULL graph output ─────────────────
-                                # LangGraph streams the complete cumulative message list on every
-                                # step. The final event contains: SystemMsg + HumanMessage + all
-                                # intermediate AIMsg(tool_calls=[...]) + ToolMsg + final AIMsg.
-                                # Capturing this preserves tool results across REPL turns so the
-                                # agent won't re-call the same tools for the same information.
-                                if last_event is not None:
-                                    conversation_history = list(last_event["messages"])
-
-                                # ── Archive new messages BEFORE any trimming ──────────────────────
-                                # Permanent record is written before summarisation can shrink
-                                # the working copy, so the full history is always preserved.
-                                if session_manager and session_id:
-                                    session_manager.append_to_archive(
-                                        session_id,
-                                        conversation_history,
-                                        already_archived_count=_archived_count,
-                                    )
-                                    _archived_count = len(conversation_history)
-
-                                # Save working-copy session to SQLite (always, even without summarisation)
-                                if session_manager and session_id:
-                                    session_manager.save_session(session_id, conversation_history)
-
-                                # ── Rolling summarization ─────────────────────────────────────
-                                if summarizer and summarizer.should_summarize(conversation_history):
-                                    orig_len = len(conversation_history)
-                                    result = await summarizer.summarize(
-                                        history=conversation_history,
-                                        prev_summary=current_summary,
-                                        known_global_facts=known_global_facts,
-                                        known_private_facts=known_private_facts,
-                                    )
-                                    conversation_history = result.trimmed_history
-                                    current_summary = result.summary         # replace with updated narrative
-                                    known_global_facts = result.global_facts # replace entirely (handles corrections)
-                                    known_private_facts = result.private_facts
-
-                                    # Update the persistent session to SQLite with the newly trimmed history
-                                    # NOTE: archive is already up-to-date — only save working copy here
-                                    if session_manager and session_id:
-                                        session_manager.save_session(session_id, conversation_history)
-
-                                    if config.summarizer.save_to_memory and backend is not None:
-                                        # Reuse the SAME backend instance (and therefore the same RAG
-                                        # server subprocess) that handles auto-inject search above.
-                                        # Creating a second backend here would spawn a second RAG server
-                                        # process writing to the same ChromaDB files simultaneously —
-                                        # that causes ChromaDB HNSW 'Error finding id' race conditions.
+                                    # --- Auto-Inject RAG Context ---
+                                    if config.memory.enabled and config.memory.auto_feed_top_k > 0:
                                         try:
-                                            # Save the session narrative into the isolated history namespace
-                                            backend.save(
-                                                job_id=f"summary_{int(time.time())}",
-                                                task="Rolling Session Summary",
-                                                summary=result.summary,
-                                                session_id=session_id
+                                            context_str = backend.search(
+                                                task_text,
+                                                category=config.memory.auto_feed_category,
+                                                session_id=session_id,
                                             )
-                                            # Save factual learnings into the global facts namespace
-                                            for fact in result.new_global_facts:
-                                                backend.save_fact(fact, is_global=True)
+                                            MAX_CONTEXT_CHARS = 4000
+                                            if len(context_str) > MAX_CONTEXT_CHARS:
+                                                context_str = context_str[:MAX_CONTEXT_CHARS] + "\n...[truncated]"
+                                            if context_str.strip() and "No relevant" not in context_str:
+                                                print(f"  {_c(GREY, '[~]')} Auto-injected {len(context_str)} chars of memory context.")
+                                                task_text = f"[System: Relevant Past Memory]\n{context_str}\n\n[User Task]\n{task_text}"
+                                        except Exception as e:
+                                            logger.warning(f"Failed to auto-fetch RAG context: {e}")
 
-                                            # Save private factual learnings
-                                            for fact in result.new_private_facts:
-                                                backend.save_fact(fact, is_global=False, session_id=session_id)
-                                        except Exception as _mem_exc:
-                                            logger.warning("[Summarizer] Could not persist to memory: %s", _mem_exc)
+                                    # --- /skillname slash-command injection ---
+                                    if (
+                                        _repl_skills
+                                        and config.skills.enabled
+                                        and config.skills.prompt_skill_trigger
+                                    ):
+                                        try:
+                                            from core.skill_loader import extract_slash_commands, load_skill_content
+                                            task_text, _triggered = extract_slash_commands(task_text, _repl_skills)
+                                            for _sk in _triggered:
+                                                _full = load_skill_content(_sk.name, _repl_skills)
+                                                task_text = f"[Skill Loaded: {_sk.name}]\n{_full}\n\n" + task_text
+                                                print(f"  {_c(GREEN, '[+]')} Skill loaded: {_sk.name}")
+                                        except Exception as _ske:
+                                            logger.warning("[Skills] Slash-command error: %s", _ske)
 
-                                    compressed = orig_len - len(conversation_history)
-                                    new_facts_count = len(result.new_global_facts) + len(result.new_private_facts)
-                                    total_facts_known = len(known_global_facts) + len(known_private_facts)
-                                    print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
-                                                f"{new_facts_count} new/changed facts saved. "
-                                                f"Total facts known: {total_facts_known}."))
+                                    conversation_history.append(HumanMessage(content=task_text))
+                                    logger.debug(f"User Task with RAG context: {task_text}")
+                                    print(f"\n{_c(BOLD, '[Task]')} {task_text_copy}\n" + "─" * 60)
 
-                                print("\n" + "─" * 60)
-                                if isinstance(final_answer, list):
-                                    final_answer = "\n".join(
-                                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
-                                        for b in final_answer
-                                    )
-                                print(f"\n{_c(BOLD, '[Final Answer]')}\n{final_answer}")
-                                print("─" * 60)
+                                    # --- Write exact LLM prompt to debug log ---
+                                    if debug_log_path:
+                                        try:
+                                            import json
+                                            from langchain_core.messages import messages_to_dict
+                                            with open(debug_log_path, "a", encoding="utf-8") as f:
+                                                f.write(f"\n--- [TURN] PROMPT FED TO LLM ---\n")
+                                                f.write(json.dumps(messages_to_dict(conversation_history), indent=2))
+                                                f.write("\n\n")
+                                        except Exception as e:
+                                            logger.error(f"Failed to write to debug log: {e}")
 
-                            except Exception as exc:
-                                print(ANSI(f"\n{_c(RED, '[ERROR]')} {exc}"))
-                                logger.exception("interactive_loop task failed")
-                                # Remove the failed user message so history stays consistent
-                                if conversation_history and isinstance(conversation_history[-1], HumanMessage):
-                                    conversation_history.pop()
+                                    # Launch agent as a background task — prompt re-arms immediately
+                                    _current_runner = asyncio.create_task(_run_agent_turn("[User]"))
 
+                                except Exception as exc:
+                                    print(ANSI(f"\n{_c(RED, '[ERROR]')} {exc}"))
+                                    logger.exception("interactive_loop task failed")
+                                    if conversation_history and isinstance(conversation_history[-1], HumanMessage):
+                                        conversation_history.pop()
+
+                        # Re-arm prompt IMMEDIATELY — user can always type, even mid-run
                         prompt_task = asyncio.create_task(session.prompt_async(ANSI(f"\n{_c(BOLD, '>> Task:')} ")))
                         pending_tasks.add(prompt_task)
 
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n\nExiting.")
         finally:
-            # Clean up tasks so the loop can terminate cleanly on Ctrl+C
+            # Clean up all tasks cleanly on Ctrl+C / exit
             for t in list(pending_tasks):
                 t.cancel()
+            if _current_runner and not _current_runner.done():
+                _current_runner.cancel()
             if _notify_task:
                 _notify_task.cancel()
 
-            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            _all_cleanup = list(pending_tasks)
+            if _current_runner:
+                _all_cleanup.append(_current_runner)
             if _notify_task:
-                await asyncio.gather(_notify_task, return_exceptions=True)
+                _all_cleanup.append(_notify_task)
+            await asyncio.gather(*_all_cleanup, return_exceptions=True)
 
     except Exception as main_exc:
         print(ANSI(f"\n{_c(RED, '[FATAL ERROR]')} {main_exc}"))
