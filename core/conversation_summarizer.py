@@ -257,7 +257,13 @@ DO NOT include generic session observations or agent behavior descriptions.
         # Build trimmed history: pinned SystemMsg(s) + summary AIMessage + recent raw msgs
         trimmed = list(system_msgs)
         if summary:
-            trimmed.append(AIMessage(content=f"[Session summary] {summary}"))
+            summary_msg = AIMessage(
+                content=f"[Session summary] {summary}",
+                response_metadata=getattr(response, "response_metadata", {}),
+                usage_metadata=getattr(response, "usage_metadata", None),
+                additional_kwargs=getattr(response, "additional_kwargs", {})
+            )
+            trimmed.append(summary_msg)
         trimmed.extend(to_keep)
 
         logger.info(
