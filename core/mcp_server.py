@@ -102,6 +102,7 @@ class AgentSession:
         self.current_summary: str = ""
         self.known_global_facts: list[str] = []
         self.known_private_facts: list[str] = []
+        self.to_summarize_buffer: list = []   # new msgs since last compression
         self._archived_count: int = 0   # messages already written to session_archive
 
         self.participants: dict[str, SessionParticipant] = {}
@@ -240,6 +241,7 @@ class AgentSession:
                         pass
 
                 self.conversation_history.append(HumanMessage(content=task_text))
+                self.to_summarize_buffer.append(HumanMessage(content=task_text))
 
                 if ctx and progress != "none":
                     await ctx.info(f"Processing message from '{sender}'...")
@@ -251,6 +253,7 @@ class AgentSession:
                 # ── Run the ReAct graph ───────────────────────────────────
                 final_answer = ""
                 last_event = None
+                _n_snap = len(self.conversation_history)  # snapshot before astream
 
                 async for event in self.graph.astream(
                     {"messages": self.conversation_history}, stream_mode="values"
@@ -326,9 +329,12 @@ class AgentSession:
                                 detail = f" | {content[:500]}"
                             await ctx.info(f"[Tool Result] {tool_name} {status}{detail}")
 
-                # ── Update history from graph output ──────────────────────
+                # ── Delta-append: only new messages from this turn ────────
+                # Full replacement would undo any previous summarizer crop.
                 if last_event is not None:
-                    self.conversation_history = list(last_event["messages"])
+                    _new_turn_msgs = last_event["messages"][_n_snap:]
+                    self.conversation_history.extend(_new_turn_msgs)
+                    self.to_summarize_buffer.extend(_new_turn_msgs)
 
                 # ── Archive new messages BEFORE any trimming ──────────────
                 # Permanent record written before summarisation can shrink the
@@ -347,26 +353,43 @@ class AgentSession:
                         self.session_id, self.conversation_history
                     )
 
-                # ── Rolling summarisation ─────────────────────────────────
+                # ── Rolling summarisation — buffer-based ──────────────────
                 if (self.summarizer
-                        and self.summarizer.should_summarize(self.conversation_history)):
+                        and self.summarizer.should_summarize(self.to_summarize_buffer)):
                     try:
                         result = await self.summarizer.summarize(
-                            history=self.conversation_history,
+                            buffer=self.to_summarize_buffer,
                             prev_summary=self.current_summary,
                             known_global_facts=self.known_global_facts,
                             known_private_facts=self.known_private_facts,
                         )
-                        self.conversation_history = result.trimmed_history
-                        self.current_summary = result.summary
-                        self.known_global_facts = result.global_facts
+
+                        # Rebuild bounded working window
+                        from langchain_core.messages import SystemMessage as _SM
+                        _keep_n   = self.summarizer._keep
+                        _sys_msgs = [m for m in self.conversation_history if isinstance(m, _SM)]
+                        _non_sys  = [m for m in self.conversation_history if not isinstance(m, _SM)]
+                        _to_keep  = _non_sys[-_keep_n:] if len(_non_sys) >= _keep_n else _non_sys
+                        self.conversation_history = _sys_msgs + [result.summary_ai_msg] + _to_keep
+
+                        self.current_summary     = result.summary
+                        self.known_global_facts  = result.global_facts
                         self.known_private_facts = result.private_facts
 
-                        # Save TRIMMED working copy — archive is already up-to-date above
+                        # Archive summary message, resync counter, save working copy
                         if self.session_manager:
+                            self.session_manager.append_to_archive(
+                                self.session_id, [result.summary_ai_msg], already_archived_count=0,
+                            )
+                            # Reset to trimmed history length — _archived_count is an offset
+                            # into conversation_history, not a DB row count.
+                            self._archived_count = len(self.conversation_history)
                             self.session_manager.save_session(
                                 self.session_id, self.conversation_history
                             )
+
+                        # Reset buffer — compression done
+                        self.to_summarize_buffer = []
 
                         if self.config.summarizer.save_to_memory and self.backend:
                             self.backend.save(
@@ -386,7 +409,7 @@ class AgentSession:
                             await ctx.info(
                                 f"[Memory] History compressed. "
                                 f"{len(result.new_global_facts) + len(result.new_private_facts)} "
-                                f"new facts saved."
+                                f"new facts saved. Window: {len(self.conversation_history)} msgs."
                             )
                     except Exception as exc:
                         logger.warning(

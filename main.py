@@ -475,6 +475,7 @@ async def interactive_loop(
         current_summary: str = ""             # rolling narrative; updated each compression cycle
         known_global_facts: list[str] = []    # full reconciled global fact list
         known_private_facts: list[str] = []   # full reconciled private fact list
+        to_summarize_buffer: list = []        # new msgs since last compression (human + AI + tool)
 
         # ── Debug Logger ───────────────────────────────────────────────────────
         debug_log_path = None
@@ -515,7 +516,7 @@ async def interactive_loop(
             the prompt stays live, and the agent sees complete context.
             """
             nonlocal conversation_history, current_summary, known_global_facts, \
-                     known_private_facts, _archived_count, _agent_running
+                     known_private_facts, _archived_count, _agent_running, to_summarize_buffer
             _agent_running = True
             try:
                 while True:   # outer loop: re-runs when an interrupt message arrives
@@ -565,11 +566,16 @@ async def interactive_loop(
                                 )
                             else:
                                 # Safe: either a ToolMessage or a final AIMessage.
-                                # Capture state, append the interrupt, and restart.
+                                # Delta-append what was produced so far, then inject
+                                # the interrupt message and restart astream().
                                 _inj_msg = _interrupt_queue.get_nowait()
                                 if last_event is not None:
-                                    conversation_history = list(last_event["messages"])
+                                    _n_before = len(conversation_history)
+                                    _partial = last_event["messages"][_n_before:]
+                                    conversation_history.extend(_partial)
+                                    to_summarize_buffer.extend(_partial)
                                 conversation_history.append(HumanMessage(content=_inj_msg))
+                                to_summarize_buffer.append(HumanMessage(content=_inj_msg))
                                 print(
                                     f"\n  {_c(YELLOW, '[~] Mid-run message received — applying to agent:')} "
                                     f"{str(_inj_msg)[:100]}"
@@ -582,12 +588,19 @@ async def interactive_loop(
                         while not _interrupt_queue.empty():
                             _extra = _interrupt_queue.get_nowait()
                             conversation_history.append(HumanMessage(content=_extra))
+                            to_summarize_buffer.append(HumanMessage(content=_extra))
                             print(f"  {_c(YELLOW, '[~]')} Additional message queued: {str(_extra)[:80]}")
                         continue  # restart the outer while loop → new astream() call
 
                     # ── Stream finished normally (no interrupt) ────────────────────
+                    # Delta-append: only take messages LangGraph ADDED this turn
+                    # (do NOT replace conversation_history wholesale — that undoes any
+                    #  previous summarizer crop and causes unbounded growth).
                     if last_event is not None:
-                        conversation_history = list(last_event["messages"])
+                        _n_before = len(conversation_history)
+                        _new_msgs = last_event["messages"][_n_before:]
+                        conversation_history.extend(_new_msgs)
+                        to_summarize_buffer.extend(_new_msgs)
                     break  # exit outer while loop
 
 
@@ -605,21 +618,43 @@ async def interactive_loop(
                     session_manager.save_session(session_id, conversation_history)
 
                 # ── Rolling summarization ──────────────────────────────────────
-                if summarizer and summarizer.should_summarize(conversation_history):
+                # Triggered by BUFFER size (msgs since last compression), not full
+                # history length. Summarizer receives only the buffer + prev_summary.
+                if summarizer and summarizer.should_summarize(to_summarize_buffer):
                     orig_len = len(conversation_history)
                     result = await summarizer.summarize(
-                        history=conversation_history,
+                        buffer=to_summarize_buffer,
                         prev_summary=current_summary,
                         known_global_facts=known_global_facts,
                         known_private_facts=known_private_facts,
                     )
-                    conversation_history = result.trimmed_history
-                    current_summary = result.summary
-                    known_global_facts = result.global_facts
+
+                    # Rebuild bounded working window:
+                    #   [SystemMsg] + [SummaryAIMsg] + [last keep_n raw msgs]
+                    _keep_n  = summarizer._keep
+                    _sys_msgs = [m for m in conversation_history if isinstance(m, SystemMessage)]
+                    _non_sys  = [m for m in conversation_history if not isinstance(m, SystemMessage)]
+                    _to_keep  = _non_sys[-_keep_n:] if len(_non_sys) >= _keep_n else _non_sys
+                    conversation_history = _sys_msgs + [result.summary_ai_msg] + _to_keep
+
+                    current_summary     = result.summary
+                    known_global_facts  = result.global_facts
                     known_private_facts = result.private_facts
 
+                    # Archive the summary message itself (separate single-item call)
                     if session_manager and session_id:
+                        session_manager.append_to_archive(
+                            session_id, [result.summary_ai_msg], already_archived_count=0,
+                        )
+                        # IMPORTANT: reset _archived_count to the TRIMMED history length.
+                        # _archived_count tracks offset into conversation_history, not DB rows.
+                        # After trim, conversation_history is short again — next turn appends
+                        # delta from len(conversation_history) onward, which is correct.
+                        _archived_count = len(conversation_history)
                         session_manager.save_session(session_id, conversation_history)
+
+                    # Reset buffer — compression cycle done
+                    to_summarize_buffer = []
 
                     if config.summarizer.save_to_memory and backend is not None:
                         try:
@@ -639,9 +674,10 @@ async def interactive_loop(
                     compressed = orig_len - len(conversation_history)
                     new_facts_count = len(result.new_global_facts) + len(result.new_private_facts)
                     total_facts_known = len(known_global_facts) + len(known_private_facts)
-                    print(_c(GREY, f"\n[~] History compressed ({compressed} msgs -> summary). "
-                                   f"{new_facts_count} new/changed facts saved. "
-                                   f"Total facts known: {total_facts_known}."))
+                    print(_c(GREY, f"\n[~] History compressed ({compressed} msgs → summary). "
+                                   f"Buffer reset. {new_facts_count} new facts saved. "
+                                   f"Total facts: {total_facts_known}. "
+                                   f"Working window: {len(conversation_history)} msgs."))
 
                 # ── Print final answer ─────────────────────────────────────────
                 print("\n" + "\u2500" * 60)
@@ -829,6 +865,7 @@ async def interactive_loop(
                             else:
                                 # ── No agent running: start a fresh turn ──────────────────────
                                 conversation_history.append(HumanMessage(content=auto_task))
+                                to_summarize_buffer.append(HumanMessage(content=auto_task))
                                 _current_runner = asyncio.create_task(_run_agent_turn("[Auto-Task]"))
 
                         # Re-arm the notification task
@@ -892,6 +929,7 @@ async def interactive_loop(
                                             logger.warning("[Skills] Slash-command error: %s", _ske)
 
                                     conversation_history.append(HumanMessage(content=task_text))
+                                    to_summarize_buffer.append(HumanMessage(content=task_text))
                                     logger.debug(f"User Task with RAG context: {task_text}")
                                     print(f"\n{_c(BOLD, '[Task]')} {task_text_copy}\n" + "─" * 60)
 

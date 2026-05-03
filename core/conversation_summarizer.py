@@ -5,36 +5,48 @@ Rolling conversation-history compressor for Agent_head.
 
 Design
 ------
-  When the raw conversation history grows beyond `trigger_after_n_messages`
-  (Human + AI messages only, SystemMessage excluded), a separate, optionally
-  lighter LLM is called once to:
+  State tracked by caller (main.py / api/server.py / mcp_server.py):
 
-    1. Extend/update the existing rolling *narrative summary*.
-    2. Extract ONLY *new* discrete facts not already known.
+    conversation_history  – bounded working window fed to LLM each turn:
+                            [SystemMsg] + [SummaryAIMsg?] + [last keep_n raw msgs]
 
-  The caller (main.py REPL loop) is responsible for persisting new/changed facts
-  and replacing known_facts with the full updated list via the MemoryBackend.
+    to_summarize_buffer   – append-only list of ALL new messages since the last
+                            compression cycle (human + AI + tool). When this list
+                            reaches `summarize_every_n_messages` the summarizer fires.
 
-Data flow per cycle
--------------------
-  known_facts  <- replaced entirely with result.facts (full reconciled list)
-  storage      <- only result.new_or_changed are persisted (avoids duplicates)
-  history      <- replaced with result.trimmed_history
-  current_summary <- replaced with result.summary
+    current_summary       – rolling narrative text; updated each cycle.
+
+  Per-turn flow (managed by caller):
+    1.  Append human_msg → to_summarize_buffer AND conversation_history.
+    2.  Run LLM (graph.astream) with conversation_history.
+    3.  Delta-append new AI/tool msgs → to_summarize_buffer AND conversation_history.
+    4.  Archive ALL new messages (human + AI/tool) to persistent store.
+    5.  if len(to_summarize_buffer) >= summarize_every_n_messages:
+            result = summarizer.summarize(buffer=to_summarize_buffer, prev_summary=...)
+            rebuild conversation_history = [sys] + [SummaryAIMsg] + last keep_n msgs
+            to_summarize_buffer = []          # reset buffer
+            current_summary = result.summary  # keep updated narrative
+
+  The summarizer only ever sees the buffer (bounded to trigger size) — never
+  the full growing history. Token cost is therefore O(trigger), not O(total msgs).
 
 Public API
 ----------
   summarizer = ConversationSummarizer(cfg, main_model_cfg)
-  if summarizer.should_summarize(conversation_history):
+  if summarizer.should_summarize(to_summarize_buffer):
       result = await summarizer.summarize(
-          history       = conversation_history,
-          prev_summary  = current_summary,
-          known_facts   = known_facts,
+          buffer       = to_summarize_buffer,
+          prev_summary = current_summary,
+          known_global_facts  = known_global_facts,
+          known_private_facts = known_private_facts,
       )
-      # result.summary         – updated narrative (replace current_summary)
-      # result.facts           – FULL reconciled fact list (replace known_facts entirely)
-      # result.new_or_changed  – only newly added/corrected facts (persist these)
-      # result.trimmed_history – ready to swap in as conversation_history
+      # result.summary           – updated narrative (replace current_summary)
+      # result.global_facts      – FULL reconciled global fact list
+      # result.private_facts     – FULL reconciled private fact list
+      # result.new_global_facts  – only new/changed global facts (persist these)
+      # result.new_private_facts – only new/changed private facts (persist these)
+      # result.summary_ai_msg    – ready-made AIMessage("[Session summary] ...") to
+      #                            inject into conversation_history by the caller
 """
 
 from __future__ import annotations
@@ -61,7 +73,8 @@ class SummaryResult:
     private_facts: list[str]     # FULL updated private fact list
     new_global_facts: list[str]  # subset: global facts that are new or changed
     new_private_facts: list[str] # subset: private facts that are new or changed
-    trimmed_history: list        # ready-to-use replacement for conversation_history
+    summary_ai_msg: object       # ready-made AIMessage("[Session summary] ...") for
+                                 # the caller to inject into conversation_history
 
 
 # ---------------------------------------------------------------------------
@@ -152,123 +165,109 @@ DO NOT include generic session observations or agent behavior descriptions.
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def should_summarize(self, history: list) -> bool:
+    def should_summarize(self, buffer: list) -> bool:
         """
-        Return True when the total number of non-system messages meets the
-        threshold.  We count ALL non-system messages (Human, AI, Tool) because
-        that is exactly what to_keep slices — so the trigger and the slice stay
-        consistent even when multi-step tool calls inflate the message count.
+        Return True when the to_summarize_buffer has accumulated enough new
+        messages to warrant a compression cycle.
 
-        Threshold = keep_recent + trigger + 1 (the injected summary AIMessage).
-        The +1 ensures we don't re-trigger immediately after a compression cycle.
+        Args:
+            buffer – the to_summarize_buffer list managed by the caller.
+                     Contains every new message (human + AI + tool) added
+                     since the last compression.  SystemMessages are excluded
+                     by convention (callers never add them to the buffer).
         """
-        count = sum(
-            1 for m in history
-            if not isinstance(m, SystemMessage)
-        )
-        # Baseline = kept raw messages + 1 (the injected summary message)
-        baseline = self._keep + 1
-        return count >= (baseline + self._trigger)
+        return len(buffer) >= self._trigger
 
     async def summarize(
         self,
-        history: list,
+        buffer: list,
         prev_summary: str = "",
         known_global_facts: list[str] | None = None,
         known_private_facts: list[str] | None = None,
     ) -> SummaryResult:
         """
-        Compress the oldest messages in *history* into an updated rolling
-        summary and a list of NEW facts.
+        Compress the to_summarize_buffer into an updated rolling summary.
+
+        The buffer contains every new message (human + AI + tool) accumulated
+        since the last compression cycle — NOT the full conversation_history.
+        This keeps token cost bounded to O(trigger size), not O(total history).
 
         Args:
-            history             – full conversation_history list (SystemMessage at [0])
-            prev_summary        – narrative from previous summarization cycle (or "")
+            buffer              – new messages since last compression (the buffer)
+            prev_summary        – narrative from previous cycle (or "")
             known_global_facts  – global facts already extracted in earlier cycles
             known_private_facts – private facts already extracted in earlier cycles
 
         Returns:
-            SummaryResult with updated summary, new-only facts, and trimmed history.
+            SummaryResult with updated summary, fact lists, and a ready-made
+            summary_ai_msg for the caller to inject into conversation_history.
         """
         known_global_facts = known_global_facts or []
         known_private_facts = known_private_facts or []
 
-        # Split history: pin SystemMessage(s), keep last N raw, compress the rest
-        system_msgs = [m for m in history if isinstance(m, SystemMessage)]
-        non_system  = [m for m in history if not isinstance(m, SystemMessage)]
-
-        # Messages to compress = all non-system except the last keep_last_n
-        to_compress = non_system[:-self._keep] if len(non_system) > self._keep else []
-        to_keep     = non_system[-self._keep:] if len(non_system) > self._keep else non_system
-
-        if not to_compress:
-            # Nothing old enough to compress — return history unchanged
-            logger.warning("[Summarizer] should_summarize returned True but nothing to compress.")
+        if not buffer:
+            logger.warning("[Summarizer] should_summarize returned True but buffer is empty.")
             return SummaryResult(
                 summary=prev_summary,
                 global_facts=known_global_facts,
                 private_facts=known_private_facts,
                 new_global_facts=[],
                 new_private_facts=[],
-                trimmed_history=history,
+                summary_ai_msg=AIMessage(content=f"[Session summary] {prev_summary}"),
             )
 
-        # Serialise messages to compress into plain text
-        messages_block = self._messages_to_text(to_compress)
+        # Serialise buffer messages into plain text for the prompt
+        messages_block = self._messages_to_text(buffer)
 
-        # Build the prompt
+        # Build the prompt: last summary + new buffer messages
         prompt = self._PROMPT_TEMPLATE.format(
             prev_summary=prev_summary or "(none yet)",
             messages_block=messages_block,
         )
 
-        logger.info(
-            "[Summarizer] Compressing %d messages (keep last %d).",
-            len(to_compress), self._keep
-        )
-
-        # Call the summarizer LLM (plain invoke, not ReAct)
         model_id = f"{self._llm.__class__.__name__}"
         print(_c("90", f"\n[Summarizer] Calling LLM ({model_id}) — "
-                       f"compressing {len(to_compress)} msgs into rolling summary and fact deltas..."))
-        
+                       f"compressing {len(buffer)} new msgs (buffer) + last summary..."))
+        logger.info(
+            "[Summarizer] Compressing buffer of %d messages.",
+            len(buffer),
+        )
+
         try:
             response = await self._llm.ainvoke(prompt)
             raw_text = self._extract_text(response)
         except Exception as exc:
             logger.error("[Summarizer] LLM call failed: %s", exc)
-            # Graceful degradation: return history unchanged
+            # Graceful degradation — return unchanged facts, keep old summary
             return SummaryResult(
                 summary=prev_summary,
                 global_facts=known_global_facts,
                 private_facts=known_private_facts,
                 new_global_facts=[],
                 new_private_facts=[],
-                trimmed_history=history,
+                summary_ai_msg=AIMessage(content=f"[Session summary] {prev_summary}"),
             )
 
         # Parse sections
         summary, new_global_facts, new_private_facts = self._parse_response(raw_text)
 
-        # We append the new facts to the running known lists (for backward compatibility if needed)
-        global_facts = known_global_facts + new_global_facts
+        global_facts  = known_global_facts  + new_global_facts
         private_facts = known_private_facts + new_private_facts
 
-        # Build trimmed history: pinned SystemMsg(s) + summary AIMessage + recent raw msgs
-        trimmed = list(system_msgs)
-        if summary:
-            summary_msg = AIMessage(
-                content=f"[Session summary] {summary}",
-                response_metadata=getattr(response, "response_metadata", {}),
-                usage_metadata=getattr(response, "usage_metadata", None),
-                additional_kwargs=getattr(response, "additional_kwargs", {})
-            )
-            trimmed.append(summary_msg)
-        trimmed.extend(to_keep)
+        # Build the summary AIMessage — caller injects this into conversation_history
+        summary_ai_msg = AIMessage(
+            content=f"[Session summary] {summary}",
+            response_metadata=getattr(response, "response_metadata", {}),
+            usage_metadata=getattr(response, "usage_metadata", None),
+            additional_kwargs=getattr(response, "additional_kwargs", {}),
+        )
 
         logger.info(
-            "[Summarizer] Done. Summary: %d chars. Global Facts: %d (new: %d), Private Facts: %d (new: %d).",
-            len(summary), len(global_facts), len(new_global_facts), len(private_facts), len(new_private_facts)
+            "[Summarizer] Done. Summary: %d chars. "
+            "Global Facts: %d (new: %d), Private Facts: %d (new: %d).",
+            len(summary),
+            len(global_facts), len(new_global_facts),
+            len(private_facts), len(new_private_facts),
         )
 
         return SummaryResult(
@@ -277,7 +276,7 @@ DO NOT include generic session observations or agent behavior descriptions.
             private_facts=private_facts,
             new_global_facts=new_global_facts,
             new_private_facts=new_private_facts,
-            trimmed_history=trimmed,
+            summary_ai_msg=summary_ai_msg,
         )
 
     # ── Internal helpers ────────────────────────────────────────────────────

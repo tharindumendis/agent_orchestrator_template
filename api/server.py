@@ -1,7 +1,7 @@
 """
 api/server.py
 --------------
-FastAPI REST + SSE interface for Agent_head.
+FastAPI REST + SSE + WebSocket interface for Agent_head.
 
 Endpoints
 ---------
@@ -11,9 +11,20 @@ Endpoints
   GET  /sessions/{session_id}          → session metadata & message count
   DELETE /sessions/{session_id}        → clear session history
   POST /sessions/{session_id}/chat     → send a message, get SSE stream back
+  WS   /ws/{session_id}               → persistent WebSocket for real-time chat
   POST /sessions/{session_id}/shutdown → tear down the live agent for a session
 
-SSE event types (streamed during /chat)
+WebSocket protocol
+------------------
+  Client sends:   {"message": "<user text>"}
+  Server streams: {"type": "tool_call",   "name": "...", "args": {...}}
+                  {"type": "tool_result", "name": "...", "content": "..."}
+                  {"type": "token",       "content": "..."}   ← streamed AI text
+                  {"type": "done",        "content": "..."}   ← final answer
+                  {"type": "error",       "content": "..."}   ← error
+                  {"type": "session_ready", "session_id": "..."} ← after boot
+
+SSE event types (streamed during /chat) — kept for backward compatibility
 --------------------------------------
   {"type": "tool_call",   "name": "...", "args": {...}}
   {"type": "tool_result", "name": "...", "content": "..."}
@@ -44,7 +55,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -83,6 +94,7 @@ class AgentSession:
         self.current_summary: str = ""
         self.known_global_facts: list[str] = []
         self.known_private_facts: list[str] = []
+        self.to_summarize_buffer: list = []   # new msgs since last compression
         self._archived_count: int = 0   # messages already written to session_archive
         self._stack = None
         self._ready = False
@@ -341,8 +353,10 @@ class AgentSession:
                     pass
 
             self.conversation_history.append(HumanMessage(content=task_text))
+            self.to_summarize_buffer.append(HumanMessage(content=task_text))
             final_answer = ""
             last_event = None
+            _n_before = len(self.conversation_history)  # snapshot before astream
 
             try:
                 async for event in self.graph.astream(
@@ -380,9 +394,12 @@ class AgentSession:
                 yield _sse({"type": "done", "content": ""})
                 return
 
-            # Capture full history from last event
+            # Delta-append: only take messages LangGraph ADDED this turn.
+            # Full replacement undoes any previous summarizer crop.
             if last_event:
-                self.conversation_history = list(last_event["messages"])
+                _new_msgs = last_event["messages"][_n_before:]
+                self.conversation_history.extend(_new_msgs)
+                self.to_summarize_buffer.extend(_new_msgs)
 
             # ── Archive new messages BEFORE any trimming ──────────────────
             # This ensures the permanent record is never affected by
@@ -399,23 +416,39 @@ class AgentSession:
             if self.session_manager:
                 self.session_manager.save_session(self.session_id, self.conversation_history)
 
-            # Rolling summarisation
-            if self.summarizer and self.summarizer.should_summarize(self.conversation_history):
+            # Rolling summarisation — buffer-based
+            if self.summarizer and self.summarizer.should_summarize(self.to_summarize_buffer):
                 try:
                     result = await self.summarizer.summarize(
-                        history=self.conversation_history,
+                        buffer=self.to_summarize_buffer,
                         prev_summary=self.current_summary,
                         known_global_facts=self.known_global_facts,
                         known_private_facts=self.known_private_facts,
                     )
-                    self.conversation_history = result.trimmed_history
-                    self.current_summary = result.summary
-                    self.known_global_facts = result.global_facts
+
+                    # Rebuild bounded working window
+                    _keep_n  = self.summarizer._keep
+                    _sys_msgs = [m for m in self.conversation_history if isinstance(m, SystemMessage)]
+                    _non_sys  = [m for m in self.conversation_history if not isinstance(m, SystemMessage)]
+                    _to_keep  = _non_sys[-_keep_n:] if len(_non_sys) >= _keep_n else _non_sys
+                    self.conversation_history = _sys_msgs + [result.summary_ai_msg] + _to_keep
+
+                    self.current_summary     = result.summary
+                    self.known_global_facts  = result.global_facts
                     self.known_private_facts = result.private_facts
 
-                    # Save TRIMMED working copy — archive is already up-to-date above
+                    # Archive summary message, resync counter, save working copy
                     if self.session_manager:
+                        self.session_manager.append_to_archive(
+                            self.session_id, [result.summary_ai_msg], already_archived_count=0,
+                        )
+                        # Reset to trimmed history length — _archived_count is an offset
+                        # into conversation_history, not a DB row count.
+                        self._archived_count = len(self.conversation_history)
                         self.session_manager.save_session(self.session_id, self.conversation_history)
+
+                    # Reset buffer
+                    self.to_summarize_buffer = []
 
                     if self.config.summarizer.save_to_memory and self.backend:
                         self.backend.save(
@@ -635,6 +668,77 @@ async def chat(session_id: str, body: ChatRequest, request: Request):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.websocket("/ws/{session_id}")
+async def websocket_chat(websocket: WebSocket, session_id: str):
+    """
+    Persistent WebSocket endpoint for real-time agent chat.
+
+    On connect:
+      • Boots (or resumes) the agent session.
+      • Sends: {"type": "session_ready", "session_id": "<id>"}
+
+    Client sends JSON frames:
+      {"message": "<user text>"}
+
+    Server streams JSON frames per message:
+      {"type": "tool_call",   "name": "...", "args": {...}}
+      {"type": "tool_result", "name": "...", "content": "..."}
+      {"type": "token",       "content": "..."}   ← streamed AI tokens
+      {"type": "done",        "content": "..."}   ← final complete answer
+      {"type": "error",       "content": "..."}   ← error during processing
+    """
+    await websocket.accept()
+
+    try:
+        # Boot the session (idempotent — resumes if already live)
+        sess = await _get_or_create_session(session_id)
+        await websocket.send_text(json.dumps({
+            "type": "session_ready",
+            "session_id": session_id,
+            "message_count": len(sess.conversation_history),
+        }))
+
+        while True:
+            # Wait for next message from the client
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "content": "Invalid JSON payload.",
+                }))
+                continue
+
+            user_message = payload.get("message", "").strip()
+            if not user_message:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "content": "message must not be empty.",
+                }))
+                continue
+
+            # Stream all agent events back over the WebSocket
+            async for sse_frame in sess.chat(user_message):
+                # sse_frame is "data: {...}\n\n" — extract the JSON payload
+                json_str = sse_frame.removeprefix("data: ").strip()
+                if json_str:
+                    await websocket.send_text(json_str)
+
+    except WebSocketDisconnect:
+        logger.info("[WS] Client disconnected from session '%s'", session_id)
+    except Exception as exc:
+        logger.exception("[WS] Unexpected error in session '%s'", session_id)
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "content": str(exc),
+            }))
+            await websocket.close()
+        except Exception:
+            pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -673,7 +777,8 @@ def main():
         os.environ["ORCHESTRATOR_CONFIG"] = args.config
 
     print(f"\n🚀  Agent_head API  →  http://{args.host}:{args.port}")
-    print(f"   Docs            →  http://{args.host}:{args.port}/docs\n")
+    print(f"   Docs            →  http://{args.host}:{args.port}/docs")
+    print(f"   WebSocket       →  ws://{args.host}:{args.port}/ws/<session_id>\n")
 
     uvicorn.run(
         "api.server:app",

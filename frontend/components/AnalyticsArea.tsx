@@ -185,6 +185,23 @@ export const AnalyticsArea: React.FC<AnalyticsAreaProps> = ({
               {data.totalMessages} msgs
             </span>
           )}
+          <button
+            onClick={() => currentHistorySession && fetchData(currentHistorySession, historyMode)}
+            disabled={isLoading}
+            className={`p-1.5 ml-1 rounded-md transition-colors ${
+              isLoading
+                ? "text-neutral-300 dark:text-neutral-700 cursor-not-allowed"
+                : "text-neutral-500 hover:text-blue-600 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+            }`}
+            title="Refresh Messages"
+          >
+            <svg
+              className={isLoading ? "animate-spin" : ""}
+              xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            >
+              <path d="M21.5 2v6h-6M2.13 15.57a10 10 0 1 0 3.4-9L2.13 15.57z"/>
+            </svg>
+          </button>
         </div>
 
         {/* Right controls */}

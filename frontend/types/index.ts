@@ -1,4 +1,4 @@
-export type EventType = "tool_call" | "tool_result" | "token" | "done" | "error";
+export type EventType = "tool_call" | "tool_result" | "token" | "done" | "error" | "session_ready";
 
 export interface ChatEvent {
   type: EventType;

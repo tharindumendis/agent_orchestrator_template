@@ -24,6 +24,7 @@ interface SidebarProps {
   isLoadingHistory: boolean;
   currentHistorySession: string | null;
   joinHistorySession: (sid: string) => void;
+  fetchHistorySessions: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -45,7 +46,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   historySessions,
   isLoadingHistory,
   currentHistorySession,
-  joinHistorySession
+  joinHistorySession,
+  fetchHistorySessions
 }) => {
   return (
     <div className="w-1/4 max-w-sm flex flex-col border-r border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950">
@@ -172,8 +174,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </>
         ) : (
           <>
-            <div className="text-xs font-semibold text-neutral-400 tracking-wider uppercase mb-3 px-2">
-              Database History
+            <div className="flex items-center justify-between px-2 mb-3">
+              <div className="text-xs font-semibold text-neutral-400 tracking-wider uppercase">
+                Database History
+              </div>
+              <button
+                onClick={fetchHistorySessions}
+                disabled={isLoadingHistory}
+                className={`p-1 rounded transition-colors ${
+                  isLoadingHistory
+                    ? "text-neutral-300 dark:text-neutral-700 cursor-not-allowed"
+                    : "text-neutral-400 hover:text-blue-500 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                }`}
+                title="Refresh History"
+              >
+                <svg
+                  className={isLoadingHistory ? "animate-spin" : ""}
+                  xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                >
+                  <path d="M21.5 2v6h-6M2.13 15.57a10 10 0 1 0 3.4-9L2.13 15.57z"/>
+                </svg>
+              </button>
             </div>
             {isLoadingHistory ? (
               <div className="text-sm text-neutral-500 italic px-2 flex items-center">

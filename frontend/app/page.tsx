@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Message, ChatEvent } from "../types";
 import { SettingsModal } from "../components/SettingsModal";
 import { Sidebar, TabT } from "../components/Sidebar";
@@ -32,6 +32,11 @@ export default function Home() {
   const [isBackendProcessing, setIsBackendProcessing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // WebSocket ref — one persistent socket per active session
+  const wsRef = useRef<WebSocket | null>(null);
+  // Track the agent message ID currently being streamed
+  const streamingMsgIdRef = useRef<string | null>(null);
+
   // Analytics State
   const [historySessions, setHistorySessions] = useState<string[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -59,6 +64,132 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // ── WebSocket helpers ──────────────────────────────────────────────────────
+
+  const disconnectWs = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // suppress auto-reconnect
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    streamingMsgIdRef.current = null;
+  }, []);
+
+  const connectWs = useCallback(
+    (sessionId: string) => {
+      disconnectWs();
+
+      const wsBase = apiBaseUrl.replace(/^http/, "ws");
+      const ws = new WebSocket(`${wsBase}/ws/${encodeURIComponent(sessionId)}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log(`[WS] Connected to session '${sessionId}'`);
+      };
+
+      ws.onmessage = (event) => {
+        let eventData: ChatEvent & { session_id?: string; message_count?: number };
+        try {
+          eventData = JSON.parse(event.data);
+        } catch {
+          console.error("[WS] Failed to parse message", event.data);
+          return;
+        }
+
+        if (eventData.type === "session_ready") {
+          // Server confirmed session is booted — nothing extra to do for now
+          return;
+        }
+
+        const agentMsgId = streamingMsgIdRef.current;
+        if (!agentMsgId) return;
+
+        setMessages((prev) => {
+          const newMessages = [...prev];
+          const msgIndex = newMessages.findIndex((m) => m.id === agentMsgId);
+          if (msgIndex === -1) return newMessages;
+
+          const msg = { ...newMessages[msgIndex] };
+          msg.toolCalls = msg.toolCalls ? [...msg.toolCalls] : [];
+
+          switch (eventData.type) {
+            case "tool_call":
+              setIsBackendProcessing(false);
+              msg.toolCalls.push({
+                name: eventData.name || "unknown_tool",
+                args: eventData.args,
+                status: "running",
+              });
+              break;
+            case "tool_result": {
+              const tcIndex = [...msg.toolCalls]
+                .reverse()
+                .findIndex(
+                  (tc) => tc.name === eventData.name && tc.status === "running"
+                );
+              if (tcIndex !== -1) {
+                const actualIndex = msg.toolCalls.length - 1 - tcIndex;
+                msg.toolCalls[actualIndex] = {
+                  ...msg.toolCalls[actualIndex],
+                  status: "done",
+                  result: eventData.content,
+                };
+              }
+              break;
+            }
+            case "token":
+              setIsBackendProcessing(false);
+              msg.content += eventData.content || "";
+              break;
+            case "done":
+              setIsBackendProcessing(false);
+              msg.isStreaming = false;
+              setIsStreaming(false);
+              streamingMsgIdRef.current = null;
+              break;
+            case "error":
+              setIsBackendProcessing(false);
+              msg.content += `\n\n[Error: ${eventData.content}]`;
+              msg.isStreaming = false;
+              setIsStreaming(false);
+              streamingMsgIdRef.current = null;
+              break;
+          }
+
+          newMessages[msgIndex] = msg;
+          return newMessages;
+        });
+      };
+
+      ws.onerror = (err) => {
+        console.error("[WS] Socket error", err);
+        setIsStreaming(false);
+        setIsBackendProcessing(false);
+        streamingMsgIdRef.current = null;
+      };
+
+      ws.onclose = (e) => {
+        console.log(`[WS] Disconnected (code ${e.code})`);
+        if (wsRef.current === ws) wsRef.current = null;
+        setIsStreaming(false);
+        setIsBackendProcessing(false);
+        streamingMsgIdRef.current = null;
+      };
+    },
+    [apiBaseUrl, disconnectWs]
+  );
+
+  // Reconnect whenever apiBaseUrl changes while a session is active
+  useEffect(() => {
+    if (currentSession) {
+      connectWs(currentSession);
+    }
+    return () => {
+      disconnectWs();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSession, apiBaseUrl]);
 
   // --- Network / Settings Methods ---
   const testConnection = async () => {
@@ -126,7 +257,7 @@ export default function Home() {
 
   const joinSession = (sessionId: string) => {
     setCurrentSession(sessionId);
-    setMessages([]); 
+    setMessages([]);
   };
 
   const clearSessionBackend = async (sessionId: string) => {
@@ -135,6 +266,7 @@ export default function Home() {
       setDeletingSessionId(sessionId);
       await fetch(`${apiBaseUrl}/sessions/${sessionId}`, { method: "DELETE" });
       if (currentSession === sessionId) {
+        disconnectWs();
         setCurrentSession(null);
         setMessages([]);
       }
@@ -146,9 +278,18 @@ export default function Home() {
     }
   };
 
-  const sendMessage = async (e?: React.FormEvent) => {
+  const sendMessage = (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!inputMessage.trim() || !currentSession || isStreaming) return;
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("[WS] Socket not ready — reconnecting...");
+      connectWs(currentSession);
+      // Give it a tick then retry
+      setTimeout(() => sendMessage(), 300);
+      return;
+    }
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -161,6 +302,7 @@ export default function Home() {
     setIsStreaming(true);
 
     const agentMsgId = (Date.now() + 1).toString();
+    streamingMsgIdRef.current = agentMsgId;
     setMessages((prev) => [
       ...prev,
       {
@@ -174,100 +316,7 @@ export default function Home() {
 
     setIsBackendProcessing(true);
 
-    try {
-      const response = await fetch(`${apiBaseUrl}/sessions/${currentSession}/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
-        body: JSON.stringify({ message: userMsg.content }),
-      });
-
-      if (!response.body) throw new Error("No response body");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || ""; 
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const dataStr = line.replace("data: ", "").trim();
-              if (!dataStr) continue;
-              const eventData = JSON.parse(dataStr) as ChatEvent;
-
-              setMessages((prev) => {
-                const newMessages = [...prev];
-                const msgIndex = newMessages.findIndex((m) => m.id === agentMsgId);
-                if (msgIndex === -1) return newMessages;
-
-                const msg = { ...newMessages[msgIndex] };
-                msg.toolCalls = msg.toolCalls ? [...msg.toolCalls] : [];
-
-                switch (eventData.type) {
-                  case "tool_call":
-                    setIsBackendProcessing(false);
-                    msg.toolCalls.push({
-                      name: eventData.name || "unknown_tool",
-                      args: eventData.args,
-                      status: "running",
-                    });
-                    break;
-                  case "tool_result":
-                    const tcIndex = [...msg.toolCalls]
-                      .reverse()
-                      .findIndex((tc) => tc.name === eventData.name && tc.status === "running");
-                    if (tcIndex !== -1) {
-                      const actualIndex = msg.toolCalls.length - 1 - tcIndex;
-                      msg.toolCalls[actualIndex] = {
-                        ...msg.toolCalls[actualIndex],
-                        status: "done",
-                        result: eventData.content,
-                      };
-                    }
-                    break;
-                  case "token":
-                    setIsBackendProcessing(false);
-                    msg.content += eventData.content || "";
-                    break;
-                  case "done":
-                    setIsBackendProcessing(false);
-                    msg.isStreaming = false;
-                    setIsStreaming(false);
-                    break;
-                  case "error":
-                    setIsBackendProcessing(false);
-                    msg.content += `\n\n[Error: ${eventData.content}]`;
-                    msg.isStreaming = false;
-                    setIsStreaming(false);
-                    break;
-                }
-
-                newMessages[msgIndex] = msg;
-                return newMessages;
-              });
-            } catch (err) {
-              console.error("Parse error for line", line, err);
-            }
-          }
-        }
-      }
-      setIsStreaming(false);
-      setIsBackendProcessing(false);
-    } catch (err) {
-      console.error("Chat error", err);
-      setIsStreaming(false);
-      setIsBackendProcessing(false);
-    }
+    ws.send(JSON.stringify({ message: userMsg.content }));
   };
 
   // --- Analytics Methods ---
@@ -313,6 +362,7 @@ export default function Home() {
         isLoadingHistory={isLoadingHistory}
         currentHistorySession={currentHistorySession}
         joinHistorySession={joinHistorySession}
+        fetchHistorySessions={fetchHistorySessions}
       />
 
       {activeTab === "chat" ? (
